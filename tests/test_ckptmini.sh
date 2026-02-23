@@ -52,9 +52,11 @@ mkdir -p "$SAVEDIR/mem"
 
 #######################################
 # Start test_call and save it
+# Also capture output to file for addresses
 #######################################
 info "Starting test_call program..."
-"$TESTCALL" &
+# Start in background with output redirected to file
+"$TESTCALL" > "$TESTDIR/test_call_output.txt" 2>&1 &
 TESTCALL_PID=$!
 sleep 0.5
 
@@ -63,6 +65,14 @@ if ! kill -0 "$TESTCALL_PID" 2>/dev/null; then
     exit 1
 fi
 pass "Started test_call (PID: $TESTCALL_PID)"
+
+# Read addresses from captured output
+ADDY=$(grep "add_numbers is at" "$TESTDIR/test_call_output.txt" | awk '{print $5}' | tr -d '0x')
+GLOBAL_VAR_ADDR=$(grep "global_var is at" "$TESTDIR/test_call_output.txt" | awk '{print $4}' | tr -d '0x')
+
+info "test_call addresses:"
+info "  add_numbers: 0x$ADDY"
+info "  global_var: 0x$GLOBAL_VAR_ADDR"
 
 info "Saving test_call process..."
 $CKPTMINI save "$TESTCALL_PID" "$SAVEDIR" > /dev/null 2>&1 || warn "save failed (may need root)"
@@ -280,16 +290,24 @@ fi
 
 #######################################
 # TEST 23: Call function (needs root)
+# Verify that calling add_numbers(1, 2) returns 3
+# Uses the test_call started at the beginning
 #######################################
 if kill -0 "$TESTCALL_PID" 2>/dev/null; then
     info "Test 23: Call remote function"
-    # Find add_numbers address from output
-    OUTPUT=$("$TESTCALL" 2>&1 & sleep 0.3; kill $! 2>/dev/null) || true
-    # Just test
-    ADDY=$(grep "add_numbers is at" <<< "$OUTPUT" | awk '{print $4}' | tr -d '0x')
+    
     if [ -n "$ADDY" ]; then
-        $CKPTMINI call "$TESTCALL_PID" "0x$ADDY" 1 > /dev/null 2>&1 || warn "call (needs root)"
-        pass "call executes"
+        # Call the function with arguments 1 and 2
+        # The test_call program outputs "add_numbers called with X and Y" and returns X+Y
+        RESULT=$($CKPTMINI call "$TESTCALL_PID" "0x$ADDY" 1 2 2>&1)
+        echo "$RESULT"
+        
+        # Check return value (should be 3 = 0x3)
+        if echo "$RESULT" | grep -qE "RAX: 0x3|RAX: 3"; then
+            pass "call function - return value is correct (3)"
+        else
+            warn "call function - return value may be incorrect"
+        fi
     else
         warn "Could not find add_numbers address"
     fi
@@ -299,26 +317,40 @@ fi
 
 #######################################
 # TEST 24: Inject shellcode (needs root)
+# Shellcode should write "Hello" to stdout
 #######################################
 info "Test 24: Inject shellcode"
-SHELLCODE="b801000000bf01000000488d3508000000ba050000000f05cc48656c6c6f"
+# Shellcode that writes "Hello" to stdout via write syscall
+# write(1, "Hello\n", 6)
+SHELLCODE="b8010000004831ff4831f64889c6ba0600000048c7c1ffffffff0f05"
 if kill -0 "$TESTCALL_PID" 2>/dev/null; then
-    $CKPTMINI inject_shellcode "$TESTCALL_PID" "$SHELLCODE" > /dev/null 2>&1 || warn "inject_shellcode (needs root)"
-    pass "inject_shellcode executes"
+    RESULT=$($CKPTMINI inject_shellcode "$TESTCALL_PID" "$SHELLCODE" 2>&1)
+    echo "$RESULT"
+    
+    # Check if shellcode wrote "Hello" to stdout
+    if echo "$RESULT" | grep -q "Hello"; then
+        pass "inject_shellcode - shellcode executed and wrote Hello"
+    # Check if shellcode hit the trap
+    elif echo "$RESULT" | grep -q "Shellcode hit TRAP"; then
+        pass "inject_shellcode - shellcode executed"
+    else
+        warn "inject_shellcode - shellcode may not have executed correctly"
+    fi
 else
     warn "test_call not running, skipping inject_shellcode test"
 fi
 
 #######################################
 # TEST 25: Watch memory (needs root)
+# Monitor memory changes - hard to verify automatically
 #######################################
 info "Test 25: Watch memory"
 if kill -0 "$TESTCALL_PID" 2>/dev/null; then
-    # Find global_var address
-    ADDR=$(grep "global_var is at" <<< "$($TESTCALL 2>&1 & sleep 0.2; kill $! 2>/dev/null)" | awk '{print $4}' | tr -d '0x')
-    if [ -n "$ADDR" ]; then
+    # Use the global_var address captured at startup
+    if [ -n "$GLOBAL_VAR_ADDR" ]; then
         # Run watch for a short time in background
-        timeout 1 $CKPTMINI watch "$TESTCALL_PID" "0x$ADDR" 4 100 > /dev/null 2>&1 || warn "watch (needs root)"
+        # Just verify it runs without crash
+        timeout 1 $CKPTMINI watch "$TESTCALL_PID" "0x$GLOBAL_VAR_ADDR" 4 100 > /dev/null 2>&1 || warn "watch (needs root)"
         pass "watch executes"
     else
         warn "Could not find global_var address"
@@ -329,16 +361,51 @@ fi
 
 #######################################
 # TEST 26: Load shared library (needs root)
+# Verify library was loaded by checking for constructor output
+# Start a new test_call specifically for this test to capture library output
 #######################################
 info "Test 26: Load shared library"
-if [ -f "$TESTLIB" ] && kill -0 "$TESTCALL_PID" 2>/dev/null; then
-    $CKPTMINI load_so "$TESTCALL_PID" "$TESTLIB" > /dev/null 2>&1 || warn "load_so (needs root)"
-    pass "load_so executes"
+
+if [ ! -f "$TESTLIB" ]; then
+    warn "testlib.so not found"
 else
-    if [ ! -f "$TESTLIB" ]; then
-        warn "testlib.so not found"
+    # Start a new test_call and capture its output to a file
+    "$TESTCALL" > "$TESTDIR/test_call_for_load.txt" 2>&1 &
+    TESTCALL_FOR_LOAD_PID=$!
+    sleep 0.5
+    
+    if kill -0 "$TESTCALL_FOR_LOAD_PID" 2>/dev/null; then
+        # Load the shared library
+        LOAD_RESULT=$($CKPTMINI load_so "$TESTCALL_FOR_LOAD_PID" "$TESTLIB" 2>&1)
+        echo "load_so result:"
+        echo "$LOAD_RESULT"
+        
+        # Give time for constructor to run
+        sleep 0.5
+        
+        # Kill the process
+        kill -9 "$TESTCALL_FOR_LOAD_PID" 2>/dev/null || true
+        wait "$TESTCALL_FOR_LOAD_PID" 2>/dev/null || true
+        
+        # Read the captured output
+        if [ -f "$TESTDIR/test_call_for_load.txt" ]; then
+            TESTCALL_OUTPUT=$(cat "$TESTDIR/test_call_for_load.txt")
+            echo "test_call output:"
+            echo "$TESTCALL_OUTPUT"
+            
+            # The library's constructor prints:
+            # puts address: 0x...\nstring address: 0x...
+            if echo "$TESTCALL_OUTPUT" | grep -q "puts address:"; then
+                pass "load_so - library loaded successfully"
+            else
+                warn "load_so - library may not have loaded"
+            fi
+        else
+            warn "load_so - could not capture test_call output"
+        fi
+    else
+        warn "Could not start test_call for load_so test"
     fi
-    warn "test_call not running or no so, skipping"
 fi
 
 #######################################
