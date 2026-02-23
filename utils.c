@@ -23,24 +23,27 @@ static const reg_entry_t reg_table[] = {
 };
 #define REG_TABLE_SIZE (sizeof(reg_table)/sizeof(reg_table[0]))
 
-int set_reg_by_name(struct user_regs_struct *regs, const char *name, uint64_t value) {
+static const reg_entry_t* find_reg(const char *name) {
     for (size_t i = 0; i < REG_TABLE_SIZE; ++i) {
         if (!strcasecmp(name, reg_table[i].name)) {
-            *(uint64_t *)((char*)regs + reg_table[i].offset) = value;
-            return 0;
+            return &reg_table[i];
         }
     }
-    return -1;
+    return NULL;
+}
+
+int set_reg_by_name(struct user_regs_struct *regs, const char *name, uint64_t value) {
+    const reg_entry_t *entry = find_reg(name);
+    if (!entry) return -1;
+    *(uint64_t *)((char*)regs + entry->offset) = value;
+    return 0;
 }
 
 int get_reg_by_name(const struct user_regs_struct *regs, const char *name, uint64_t *out) {
-    for (size_t i = 0; i < REG_TABLE_SIZE; ++i) {
-        if (!strcasecmp(name, reg_table[i].name)) {
-            *out = *(uint64_t *)((const char*)regs + reg_table[i].offset);
-            return 0;
-        }
-    }
-    return -1;
+    const reg_entry_t *entry = find_reg(name);
+    if (!entry) return -1;
+    *out = *(uint64_t *)((const char*)regs + entry->offset);
+    return 0;
 }
 
 int setreg(setreg_mode_t mode, void *target, const char *regname, uint64_t value) {
@@ -230,13 +233,9 @@ bool for_each_mapping(pid_t pid, bool (*cb)(pid_t, uint64_t, uint64_t, const cha
     procmaps_iterator *it = parse_maps_live(pid);
     if (!it) return false;
     procmaps_struct *map;
-    char perms[5] = "----";
+    char perms[5];
     while ((map = pmparser_next(it)) != NULL) {
-        perms[0] = map->is_r ? 'r' : '-';
-        perms[1] = map->is_w ? 'w' : '-';
-        perms[2] = map->is_x ? 'x' : '-';
-        perms[3] = map->is_p ? 'p' : '-';
-        perms[4] = '\0';
+        get_perms_string(map, perms);
         if (!cb(pid, (uint64_t)map->addr_start, (uint64_t)map->addr_end, perms, map->pathname ? map->pathname : "", ud)) {
             pmparser_free(it);
             return true;
@@ -255,6 +254,14 @@ bool mapping_matches_seg_perms(const char *perms, const char *seg) {
     return true;
 }
 
+void get_perms_string(const procmaps_struct *map, char *perms) {
+    perms[0] = map->is_r ? 'r' : '-';
+    perms[1] = map->is_w ? 'w' : '-';
+    perms[2] = map->is_x ? 'x' : '-';
+    perms[3] = map->is_p ? 'p' : '-';
+    perms[4] = '\0';
+}
+
 bool mapping_matches_seg(const char *perms, const char *path, const char *seg) {
     if (!seg || !seg[0] || !strcmp(seg, "any")) return true;
     bool is_text = (perms[2] == 'x');
@@ -269,8 +276,7 @@ bool read_bytes_from_pid(pid_t pid, uintptr_t addr, void *data, size_t len) {
     struct iovec remote = { .iov_base = (void*)addr, .iov_len = len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
     if (n >= 0 && (size_t)n == len) return true;
-    char memp[256]; snprintf(memp, sizeof(memp), "/proc/%d/mem", pid);
-    int memfd = open(memp, O_RDONLY);
+    int memfd = get_memfd(pid, O_RDONLY);
     if (memfd < 0) return false;
     n = pread(memfd, data, len, (off_t)addr);
     close(memfd);
@@ -282,13 +288,17 @@ bool write_bytes_to_pid(pid_t pid, uint64_t addr, const void *buf, size_t len) {
     struct iovec remote = { .iov_base = (void*)addr, .iov_len = len };
     ssize_t n = process_vm_writev(pid, &local, 1, &remote, 1, 0);
     if (n >= 0 && (size_t)n == len) return true;
-
-    char memp[256]; snprintf(memp, sizeof(memp), "/proc/%d/mem", pid);
-    int memfd = open(memp, O_RDWR);
+    int memfd = get_memfd(pid, O_RDWR);
     if (memfd < 0) return false;
     n = pwrite(memfd, buf, len, (off_t)addr);
     close(memfd);
     return (n >= 0 && (size_t)n == len);
+}
+
+int get_memfd(pid_t pid, int flags) {
+    char memp[256];
+    snprintf(memp, sizeof(memp), "/proc/%d/mem", pid);
+    return open(memp, flags);
 }
 
 static size_t dump_bytes_from_mem(pid_t pid, int memfd, uint64_t start, void *buf, size_t len) {
@@ -355,6 +365,26 @@ void save_maps_and_memory(pid_t pid, const char *dir) {
     pmparser_free(it);
     close(memfd);
     fclose(fout);
+}
+
+int find_chunk_for_addr(const char *memdir, uint64_t addr, size_t len, char *path, size_t path_sz, off_t *out_offset) {
+    DIR *d = opendir(memdir);
+    if (!d) return -1;
+    struct dirent *de;
+    int result = -1;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        unsigned long long s = 0, e = 0;
+        if (sscanf(de->d_name, "%16llx-%16llx.bin", &s, &e) != 2) continue;
+        if (s <= addr && addr + len <= e) {
+            snprintf(path, path_sz, "%s/%s", memdir, de->d_name);
+            *out_offset = (off_t)(addr - s);
+            result = 0;
+            break;
+        }
+    }
+    closedir(d);
+    return result;
 }
 
 void usage(const char *prog) {
