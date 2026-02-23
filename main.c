@@ -1,6 +1,7 @@
 #include "ckptmini.h"
 
 int main(int argc, char **argv) {
+    g_is_tty = is_tty();
     if (argc < 2) { usage(argv[0]); return EXIT_FAILURE; }
 
     if (!strcmp(argv[1], "setreg")) {
@@ -129,17 +130,17 @@ int main(int argc, char **argv) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);
         const char *indir = argv[3];
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_CYAN);
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Restoring dump %s into PID %d\n", S_INFO, indir, pid);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH restore");
         waitpid(pid, NULL, 0);
         restore_into(pid, indir);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        if (tty) printf(A_BOLD A_GREEN);
+        if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Restore complete. Use 'resume' to continue.\n", S_OK);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         return EXIT_SUCCESS;
     }
 
@@ -147,17 +148,17 @@ int main(int argc, char **argv) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);
         const char *indir = argv[3];
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_CYAN);
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Relocating dump %s into PID %d\n", S_INFO, indir, pid);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH relocate");
         waitpid(pid, NULL, 0);
         relocate_into(pid, indir);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        if (tty) printf(A_BOLD A_GREEN);
+        if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Relocation complete. Use 'resume' to continue.\n", S_OK);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         return EXIT_SUCCESS;
     }
 
@@ -257,18 +258,18 @@ int main(int argc, char **argv) {
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
         if (!bytes) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s Invalid hex bytes\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             return EXIT_FAILURE;
         }
         bool ok = mem_write_region(pid, addr, bytes, blen);
         if (ok) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_GREEN);
+            
+            if (g_is_tty) printf(A_BOLD A_GREEN);
             printf("  %s Wrote %zu bytes to PID %d at 0x%016llx\n", S_OK, blen, pid, (unsigned long long)addr);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
         free(bytes);
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -282,10 +283,10 @@ int main(int argc, char **argv) {
         size_t blen = strlen(str);
         bool ok = mem_write_region(pid, addr, str, blen);
         if (ok) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_GREEN);
+            
+            if (g_is_tty) printf(A_BOLD A_GREEN);
             printf("  %s Wrote %zu bytes to PID %d at 0x%016llx\n", S_OK, blen, pid, (unsigned long long)addr);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -298,10 +299,10 @@ int main(int argc, char **argv) {
         unsigned char *buf = (unsigned char*)malloc(len);
         bool ok = read_bytes_from_pid(pid, addr, buf, len);
         if (ok) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_CYAN);
+            
+            if (g_is_tty) printf(A_BOLD A_CYAN);
             printf("  %s Reading %zu bytes from PID %d at 0x%016llx\n", S_INFO, len, pid, (unsigned long long)addr);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             for (size_t off = 0; off < len; off += 16) {
                 size_t row = len - off < 16 ? len - off : 16;
                 hexdump_line(addr + off, buf + off, row);
@@ -342,10 +343,10 @@ int main(int argc, char **argv) {
         const char *indir = argv[2];
         const char *text = argv[3];
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_CYAN);
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Searching for string '%s' in dump %s\n", S_INFO, text, indir);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         size_t found = search_all_in_dumped_maps(indir, (const unsigned char*)text, strlen(text), seg, 1);
         return (found > 0) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -357,17 +358,17 @@ int main(int argc, char **argv) {
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
         if (!bytes) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s Invalid hex bytes\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             return EXIT_FAILURE;
         }
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_CYAN);
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Searching for bytes %s in dump %s\n", S_INFO, hex, indir);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         size_t found = search_all_in_dumped_maps(indir, bytes, blen, seg, 1);
         free(bytes);
         return (found > 0) ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -427,33 +428,33 @@ int main(int argc, char **argv) {
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
         if (!bytes) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s Invalid hex bytes\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             return EXIT_FAILURE;
         }
         char memdir[512]; snprintf(memdir, sizeof(memdir), "%s/mem", indir);
         DIR *d = opendir(memdir); if (!d) { free(bytes); return EXIT_FAILURE; }
         struct dirent *de; bool ok=false; int found=0;
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_GREEN);
+        
+        if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Writing %zu bytes to dump %s at 0x%016llx\n", S_OK, blen, indir, (unsigned long long)addr);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         while ((de = readdir(d))) {
             if (de->d_name[0]=='.') continue;
             unsigned long long s=0,e=0; if (sscanf(de->d_name, "%16llx-%16llx.bin", &s, &e) != 2) continue;
             if (s <= addr && addr+blen <= e) {
-                if (tty) printf(A_BOLD A_CYAN);
+                if (g_is_tty) printf(A_BOLD A_CYAN);
                 printf("  %s Matched chunk %016llx-%016llx\n", S_INFO, (unsigned long long)s, (unsigned long long)e);
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
                 char path[1024]; snprintf(path, sizeof(path), "%s/%s", memdir, de->d_name);
                 int fd = open(path, O_RDWR); if (fd<0) continue;
                 off_t off = (off_t)(addr - s);
                 if (pwrite(fd, bytes, blen, off) == (ssize_t)blen) {
-                    if (tty) printf(A_GREEN);
+                    if (g_is_tty) printf(A_GREEN);
                     printf("  %s Wrote: %s offset=0x%lx\n", S_OK, path, (unsigned long)off);
-                    if (tty) printf(A_RESET);
+                    if (g_is_tty) printf(A_RESET);
                     ok=true; found++;
                 }
                 close(fd);
@@ -461,10 +462,10 @@ int main(int argc, char **argv) {
         }
         closedir(d); free(bytes);
         if (!found) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s No chunk contained the address.\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -478,24 +479,24 @@ int main(int argc, char **argv) {
         char memdir[512]; snprintf(memdir, sizeof(memdir), "%s/mem", indir);
         DIR *d = opendir(memdir); if (!d) return EXIT_FAILURE;
         struct dirent *de; bool ok=false; int found=0;
-        bool tty = is_tty();
-        if (tty) printf(A_BOLD A_GREEN);
+        
+        if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Writing %zu bytes to dump %s at 0x%016llx\n", S_OK, blen, indir, (unsigned long long)addr);
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         while ((de = readdir(d))) {
             if (de->d_name[0]=='.') continue;
             unsigned long long s=0,e=0; if (sscanf(de->d_name, "%16llx-%16llx.bin", &s, &e) != 2) continue;
             if (s <= addr && addr+blen <= e) {
-                if (tty) printf(A_BOLD A_CYAN);
+                if (g_is_tty) printf(A_BOLD A_CYAN);
                 printf("  %s Matched chunk %016llx-%016llx\n", S_INFO, (unsigned long long)s, (unsigned long long)e);
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
                 char path[1024]; snprintf(path, sizeof(path), "%s/%s", memdir, de->d_name);
                 int fd = open(path, O_RDWR); if (fd<0) continue;
                 off_t off = (off_t)(addr - s);
                 if (pwrite(fd, str, blen, off) == (ssize_t)blen) {
-                    if (tty) printf(A_GREEN);
+                    if (g_is_tty) printf(A_GREEN);
                     printf("  %s Wrote: %s offset=0x%lx\n", S_OK, path, (unsigned long)off);
-                    if (tty) printf(A_RESET);
+                    if (g_is_tty) printf(A_RESET);
                     ok=true; found++;
                 }
                 close(fd);
@@ -503,10 +504,10 @@ int main(int argc, char **argv) {
         }
         closedir(d);
         if (!found) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s No chunk contained the address.\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -529,10 +530,10 @@ int main(int argc, char **argv) {
                 ssize_t rd = pread(fd, buf, len, off);
                 close(fd);
                 if (rd == (ssize_t)len) {
-                    bool tty = is_tty();
-                    if (tty) printf(A_BOLD A_CYAN);
+                    
+                    if (g_is_tty) printf(A_BOLD A_CYAN);
                     printf("  %s Reading %zu bytes from dump %s at 0x%016llx\n", S_INFO, len, indir, (unsigned long long)addr);
-                    if (tty) printf(A_RESET);
+                    if (g_is_tty) printf(A_RESET);
                     for (size_t o = 0; o < len; o += 16) {
                         size_t row = len - o < 16 ? len - o : 16;
                         hexdump_line(addr + o, buf + o, row);
@@ -543,10 +544,10 @@ int main(int argc, char **argv) {
         }
         closedir(d);
         if (!found) {
-            bool tty = is_tty();
-            if (tty) printf(A_BOLD A_RED);
+            
+            if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s No chunk contained the address.\n", S_ERR);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
         free(buf);
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;

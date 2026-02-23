@@ -21,13 +21,13 @@ static const char *map_tag(const char *name) {
 }
 
 void cmd_dump(const char *arg) {
-    bool tty = is_tty();
+    
     bool is_live = true;
     for (const char *p = arg; *p; p++) {
         if (*p < '0' || *p > '9') { is_live = false; break; }
     }
 
-    if (tty) printf(A_BGBLUE A_WHITE A_BOLD);
+    if (g_is_tty) printf(A_BGBLUE A_WHITE A_BOLD);
     if (is_live) {
         pid_t pid = (pid_t)atoi(arg);
         char cpath[64], cmdline[256] = ""; int cfd;
@@ -42,18 +42,18 @@ void cmd_dump(const char *arg) {
     } else {
         printf("  DUMP  %-47s", arg);
     }
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
     printf("\n");
 
     procmaps_iterator *it = is_live ? parse_maps_live((pid_t)atoi(arg)) : parse_maps_dump(arg);
     if (!it) { perror("fopen maps"); return; }
 
-    if (tty) printf(A_BOLD A_CYAN);
+    if (g_is_tty) printf(A_BOLD A_CYAN);
     printf("  %-18s %-18s  %-4s  %8s  %s\n", "START", "END", "PERM", "SIZE", "NAME");
-    if (tty) printf(A_RESET A_DIM);
+    if (g_is_tty) printf(A_RESET A_DIM);
     printf("  %-18s %-18s  %-4s  %8s  %s\n",
            "──────────────────", "──────────────────", "────", "────────", "──────────────────────");
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
 
     uint64_t total_bytes = 0; size_t region_count = 0;
     procmaps_struct *map;
@@ -70,13 +70,13 @@ void cmd_dump(const char *arg) {
         perms[2] = map->is_x ? 'x' : '-';
         perms[3] = map->is_p ? 'p' : '-';
         perms[4] = '\0';
-        print_perms_colored(perms, tty);
+        print_perms_colored(perms, g_is_tty);
 
         char szbuf[16]; hr_size(sz, szbuf, sizeof(szbuf));
         printf("  %8s  ", szbuf);
 
         const char *tag = map->pathname ? map->pathname : "";
-        if (tty) {
+        if (g_is_tty) {
             if (strstr(tag,"heap"))       printf(A_YELLOW);
             else if (strstr(tag,"stack")) printf(A_RED);
             else if (tag[0]=='[')         printf(A_DIM);
@@ -88,16 +88,16 @@ void cmd_dump(const char *arg) {
         } else {
             printf("[anon]");
         }
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
         printf("\n");
     }
     pmparser_free(it);
 
     char totbuf[16]; hr_size(total_bytes, totbuf, sizeof(totbuf));
-    if (tty) printf(A_DIM);
+    if (g_is_tty) printf(A_DIM);
     printf("  %-18s %-18s  %-4s  %8s  %zu region(s)\n",
            "──────────────────", "──────────────────", "────", totbuf, region_count);
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
 
     struct user_regs_struct regs;
     bool got_regs = false;
@@ -122,17 +122,17 @@ void cmd_dump(const char *arg) {
     }
 
     printf("\n");
-    if (tty) printf(A_BOLD A_CYAN);
+    if (g_is_tty) printf(A_BOLD A_CYAN);
     printf("  %-14s %-18s    %-14s %-18s\n", "REGISTER", "VALUE", "REGISTER", "VALUE");
-    if (tty) printf(A_RESET A_DIM);
+    if (g_is_tty) printf(A_RESET A_DIM);
     printf("  %-14s %-18s    %-14s %-18s\n",
            "──────────────", "──────────────────", "──────────────", "──────────────────");
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
 
     if (!got_regs) {
-        if (tty) printf(A_DIM);
+        if (g_is_tty) printf(A_DIM);
         printf("  (registers unavailable)\n");
-        if (tty) printf(A_RESET);
+        if (g_is_tty) printf(A_RESET);
     } else {
         typedef struct { const char *name; uint64_t val; } rv_t;
         rv_t left[]  = {
@@ -153,18 +153,18 @@ void cmd_dump(const char *arg) {
         size_t nrows  = nleft > nright ? nleft : nright;
         for (size_t i = 0; i < nrows; i++) {
             if (i < nleft) {
-                if (tty) printf(A_BOLD);
+                if (g_is_tty) printf(A_BOLD);
                 printf("  %-14s", left[i].name);
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
                 printf(" %016llx", (unsigned long long)left[i].val);
             } else {
                 printf("  %-14s %-18s", "", "");
             }
             printf("    ");
             if (i < nright) {
-                if (tty) printf(A_BOLD);
+                if (g_is_tty) printf(A_BOLD);
                 printf("%-14s", right[i].name);
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
                 printf(" %016llx", (unsigned long long)right[i].val);
             }
             printf("\n");
@@ -174,12 +174,11 @@ void cmd_dump(const char *arg) {
 }
 
 void cmd_watch(pid_t pid, uint64_t addr, size_t len, unsigned int interval_ms) {
-    bool tty = isatty(STDOUT_FILENO);
     unsigned char *prev = (unsigned char *)calloc(1, len);
     unsigned char *curr = (unsigned char *)malloc(len);
     bool first = true;
 
-    if (tty) {
+    if (g_is_tty) {
         printf(A_BOLD A_CYAN);
         printf("Watching PID %d  addr=0x%016llx  len=%zu  interval=%ums  (Ctrl-C to stop)\n",
                pid, (unsigned long long)addr, len, interval_ms);
@@ -197,9 +196,9 @@ void cmd_watch(pid_t pid, uint64_t addr, size_t len, unsigned int interval_ms) {
                 size_t fc = 0;
                 while (fc < len && prev[fc] == curr[fc]) fc++;
                 print_timestamp();
-                if (tty) printf(A_YELLOW A_BOLD);
+                if (g_is_tty) printf(A_YELLOW A_BOLD);
                 printf("CHANGED at +0x%zx", fc);
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
                 printf("\n");
             } else {
                 print_timestamp();
@@ -210,9 +209,9 @@ void cmd_watch(pid_t pid, uint64_t addr, size_t len, unsigned int interval_ms) {
             for (size_t off = 0; off < len; off += 16) {
                 size_t row = len - off < 16 ? len - off : 16;
                 bool changed = !first && (memcmp(prev + off, curr + off, row) != 0);
-                if (tty && changed) printf(A_YELLOW);
+                if (g_is_tty && changed) printf(A_YELLOW);
                 hexdump_line(addr + off, curr + off, row);
-                if (tty && changed) printf(A_RESET);
+                if (g_is_tty && changed) printf(A_RESET);
             }
             fflush(stdout);
             memcpy(prev, curr, len);
@@ -226,7 +225,7 @@ void cmd_watch(pid_t pid, uint64_t addr, size_t len, unsigned int interval_ms) {
 }
 
 void cmd_snapshot_diff(pid_t pid, const char *indir) {
-    bool tty = is_tty();
+    
 
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "snapshot_diff: permission denied (need root)\n"); return; }
@@ -239,13 +238,13 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
     DIR *d = opendir(memdir);
     if (!d) { ptrace(PTRACE_DETACH, pid, NULL, NULL); perror("opendir mem"); return; }
 
-    if (tty) printf(A_BOLD A_CYAN);
+    if (g_is_tty) printf(A_BOLD A_CYAN);
     printf("  Snapshot diff: PID %d  vs  %s\n", pid, indir);
-    if (tty) printf(A_RESET A_DIM);
+    if (g_is_tty) printf(A_RESET A_DIM);
     printf("  %-34s  %-10s  %-10s  %s\n", "REGION", "SAVED SZ", "CHANGED", "RANGES");
     printf("  %-34s  %-10s  %-10s  %s\n",
            "──────────────────────────────────", "──────────", "──────────", "───────────────────────");
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
 
     size_t total_diff = 0, total_regions = 0, changed_regions = 0;
     struct dirent *de;
@@ -268,10 +267,10 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
 
         unsigned char *live = (unsigned char*)malloc(len);
         if (!read_bytes_from_pid(pid, rs, live, len)) {
-            if (tty) printf(A_DIM);
+            if (g_is_tty) printf(A_DIM);
             printf("  %016llx-%016llx  %8zuB  %-10s  (unreadable in live process)\n",
                    (unsigned long long)rs, (unsigned long long)re, len, "--");
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             free(saved); free(live); continue;
         }
 
@@ -295,7 +294,7 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
             changed_regions++;
             char diffbuf[16]; hr_size((uint64_t)diff_bytes, diffbuf, sizeof(diffbuf));
 
-            if (tty) printf(A_YELLOW);
+            if (g_is_tty) printf(A_YELLOW);
             printf("  %016llx-%016llx  %8s  %8s  ",
                    (unsigned long long)rs, (unsigned long long)re, szbuf, diffbuf);
             for (size_t r = 0; r < nruns && r < 4; r++) {
@@ -303,30 +302,30 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
                 if (r + 1 < nruns && r + 1 < 4) printf(", ");
             }
             if (nruns > 4) printf(", …(%zu more)", nruns - 4);
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
             printf("\n");
 
             if (nruns > 0) {
                 size_t show = runs[0].end - runs[0].start;
                 if (show > 32) show = 32;
-                if (tty) printf(A_DIM);
+                if (g_is_tty) printf(A_DIM);
                 printf("    saved: ");
                 for (size_t k = 0; k < show; k++) printf("%02x ", saved[runs[0].start + k]);
                 printf("\n");
                 printf("    live:  ");
                 for (size_t k = 0; k < show; k++) {
-                    if (tty && saved[runs[0].start+k] != live[runs[0].start+k]) printf(A_RESET A_RED A_BOLD);
+                    if (g_is_tty && saved[runs[0].start+k] != live[runs[0].start+k]) printf(A_RESET A_RED A_BOLD);
                     printf("%02x ", live[runs[0].start + k]);
-                    if (tty && saved[runs[0].start+k] != live[runs[0].start+k]) printf(A_RESET A_DIM);
+                    if (g_is_tty && saved[runs[0].start+k] != live[runs[0].start+k]) printf(A_RESET A_DIM);
                 }
                 printf("\n");
-                if (tty) printf(A_RESET);
+                if (g_is_tty) printf(A_RESET);
             }
         } else {
-            if (tty) printf(A_DIM);
+            if (g_is_tty) printf(A_DIM);
             printf("  %016llx-%016llx  %8s  %10s  (identical)\n",
                    (unsigned long long)rs, (unsigned long long)re, szbuf, "0B");
-            if (tty) printf(A_RESET);
+            if (g_is_tty) printf(A_RESET);
         }
 
         free(saved); free(live);
@@ -336,15 +335,15 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
 
     char totbuf[16]; hr_size((uint64_t)total_diff, totbuf, sizeof(totbuf));
     printf("\n");
-    if (tty) printf(A_BOLD);
+    if (g_is_tty) printf(A_BOLD);
     printf("  Summary: %zu/%zu regions changed,  %s total bytes differ\n",
            changed_regions, total_regions, totbuf);
-    if (tty) printf(A_RESET);
+    if (g_is_tty) printf(A_RESET);
     printf("\n");
 }
 
 void cmd_breakpoint(pid_t pid, uint64_t addr) {
-    bool tty = is_tty();
+    
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "breakpoint: permission denied (need root)\n"); return; }
         else if (errno == ESRCH) { fprintf(stderr, "breakpoint: no such process %d\n", pid); return; }
@@ -368,7 +367,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
         return;
     }
 
-    if (tty) printf(A_BOLD A_YELLOW "  ◆ Breakpoint set at 0x%016llx. Continuing...\n" A_RESET, (unsigned long long)addr);
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Breakpoint set at 0x%016llx. Continuing...\n" A_RESET, (unsigned long long)addr);
     else printf("Breakpoint set at 0x%016llx. Continuing...\n", (unsigned long long)addr);
 
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) == -1) DIE("PTRACE_CONT");
@@ -383,7 +382,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
         if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) DIE("PTRACE_SETREGS");
         if (ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)orig_word) == -1) DIE("PTRACE_POKETEXT restore");
 
-        if (tty) printf(A_BOLD A_GREEN "\n  ★ Breakpoint HIT at 0x%016llx\n" A_RESET, (unsigned long long)regs.rip);
+        if (g_is_tty) printf(A_BOLD A_GREEN "\n  ★ Breakpoint HIT at 0x%016llx\n" A_RESET, (unsigned long long)regs.rip);
         else printf("\nBreakpoint HIT at 0x%016llx\n", (unsigned long long)regs.rip);
 
         ptrace(PTRACE_DETACH, pid, NULL, (void*)SIGSTOP);
@@ -405,7 +404,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
     unsigned char *shellcode = parse_hex(hex, &slen);
     if (!shellcode) { fprintf(stderr, "inject_shellcode: invalid hex strings\n"); return; }
 
-    bool tty = is_tty();
+    
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "inject: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "inject: no such process %d\n", pid); }
@@ -439,7 +438,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
         }
         free(verify);
 
-        if (tty) printf(A_BOLD A_YELLOW "  ◆ Injecting %zu bytes at 0x%016llx. Running...\n" A_RESET, slen, (unsigned long long)pocket);
+        if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Injecting %zu bytes at 0x%016llx. Running...\n" A_RESET, slen, (unsigned long long)pocket);
         else printf("Injecting %zu bytes at 0x%016llx. Running...\n", slen, (unsigned long long)pocket);
 
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) DIE("PTRACE_GETREGS hijack");
@@ -454,7 +453,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
 
         waitpid(pid, &st, __WALL);
         if (WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP) {
-            if (tty) printf(A_BOLD A_GREEN "  ★ Shellcode hit TRAP. Restoring state.\n" A_RESET);
+            if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Shellcode hit TRAP. Restoring state.\n" A_RESET);
             else printf("Shellcode hit TRAP. Restoring state.\n");
         } else {
             int sig = WIFSTOPPED(st) ? WSTOPSIG(st) : (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
@@ -476,7 +475,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
 }
 
 void cmd_trace(pid_t pid) {
-    bool tty = is_tty();
+    
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "trace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "trace: no such process %d\n", pid); }
@@ -487,7 +486,7 @@ void cmd_trace(pid_t pid) {
 
     if (ptrace(PTRACE_SETOPTIONS, pid, NULL, (void*)PTRACE_O_TRACESYSGOOD) == -1) DIE("PTRACE_SETOPTIONS");
 
-    if (tty) printf(A_BOLD A_YELLOW "  ◆ Tracing syscalls for PID %d. Press Ctrl+C to stop.\n" A_RESET, pid);
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Tracing syscalls for PID %d. Press Ctrl+C to stop.\n" A_RESET, pid);
     else printf("Tracing syscalls for PID %d...\n", pid);
 
     bool in_syscall = false;
@@ -509,19 +508,19 @@ void cmd_trace(pid_t pid) {
             if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
 
             if (!in_syscall) {
-                if (tty) printf(A_CYAN "  [entry]" A_RESET " syscall(%lld) args: %016llx %016llx %016llx\n",
+                if (g_is_tty) printf(A_CYAN "  [entry]" A_RESET " syscall(%lld) args: %016llx %016llx %016llx\n",
                        (long long)regs.orig_rax, (long long)regs.rdi, (long long)regs.rsi, (long long)regs.rdx);
                 else printf("[entry] syscall(%lld) args: %016llx %016llx %016llx\n",
                        (long long)regs.orig_rax, (long long)regs.rdi, (long long)regs.rsi, (long long)regs.rdx);
                 in_syscall = true;
             } else {
-                if (tty) printf(A_GREEN "  [exit] " A_RESET " result: %lld\n", (long long)regs.rax);
+                if (g_is_tty) printf(A_GREEN "  [exit] " A_RESET " result: %lld\n", (long long)regs.rax);
                 else printf("[exit] result: %lld\n", (long long)regs.rax);
                 in_syscall = false;
             }
             fflush(stdout);
         } else if (WIFSTOPPED(st)) {
-            if (tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, WSTOPSIG(st));
+            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, WSTOPSIG(st));
             else printf("(stopped by signal %d)\n", WSTOPSIG(st));
         }
     }
@@ -532,7 +531,7 @@ void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
     int prot = parse_perms(perms_str);
     if (prot < 0) { fprintf(stderr, "mprotect: invalid perms '%s'\n", perms_str); return; }
 
-    bool tty = is_tty();
+    
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "mprotect: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "mprotect: no such process %d\n", pid); }
@@ -544,7 +543,7 @@ void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
     long ret = remote_syscall_x64(pid, __NR_mprotect, addr, len, prot, 0, 0, 0);
 
     if (ret == 0) {
-        if (tty) printf(A_BOLD A_GREEN "  ★ mprotect(0x%016llx, %zu, %s) SUCCESS\n" A_RESET,
+        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ mprotect(0x%016llx, %zu, %s) SUCCESS\n" A_RESET,
                         (unsigned long long)addr, len, perms_str);
         else printf("mprotect(0x%016llx, %zu, %s) SUCCESS\n", (unsigned long long)addr, len, perms_str);
     } else {
@@ -555,7 +554,7 @@ void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
 }
 
 void cmd_backtrace(pid_t pid, bool pause) {
-    bool tty = is_tty();
+    
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "backtrace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "backtrace: no such process %d\n", pid); }
@@ -571,7 +570,7 @@ void cmd_backtrace(pid_t pid, bool pause) {
         return;
     }
 
-    if (tty) printf(A_BOLD A_CYAN "  ◆ Backtrace for PID %d\n" A_RESET, pid);
+    if (g_is_tty) printf(A_BOLD A_CYAN "  ◆ Backtrace for PID %d\n" A_RESET, pid);
     else printf("Backtrace for PID %d\n", pid);
 
     uint64_t rbp = regs.rbp;
@@ -609,12 +608,12 @@ void cmd_backtrace(pid_t pid, bool pause) {
 }
 
 void cmd_signals(pid_t pid) {
-    bool tty = is_tty();
+    
     char path[512]; snprintf(path, sizeof(path), "/proc/%d/status", pid);
     FILE *f = fopen(path, "r");
     if (!f) { perror("signals: fopen status"); return; }
 
-    if (tty) printf(A_BOLD A_CYAN "  ◆ Signal State for PID %d\n" A_RESET, pid);
+    if (g_is_tty) printf(A_BOLD A_CYAN "  ◆ Signal State for PID %d\n" A_RESET, pid);
     else printf("Signal State for PID %d\n", pid);
 
     char line[1024];
@@ -628,7 +627,7 @@ void cmd_signals(pid_t pid) {
 }
 
 void cmd_fds(pid_t pid) {
-    bool tty = is_tty();
+    
     char fd_path[512];
     snprintf(fd_path, sizeof(fd_path), "/proc/%d/fd", pid);
     DIR *d = opendir(fd_path);
@@ -638,7 +637,7 @@ void cmd_fds(pid_t pid) {
         return;
     }
 
-    if (tty) printf(A_BOLD A_CYAN "  ◆ Open File Descriptors for PID %d\n" A_RESET, pid);
+    if (g_is_tty) printf(A_BOLD A_CYAN "  ◆ Open File Descriptors for PID %d\n" A_RESET, pid);
     else printf("Open File Descriptors for PID %d\n", pid);
     printf("  %-4s  %-10s  %s\n", "FD", "OFFSET", "TARGET");
     printf("  ────  ──────────  ──────────────────────\n");
@@ -676,7 +675,7 @@ void cmd_fds(pid_t pid) {
 }
 
 uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool detach, uint64_t *ret_val) {
-    bool tty = is_tty();
+    
     bool already_attached = false;
 
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
@@ -734,7 +733,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
 
     ptrace(PTRACE_SETREGS, pid, 0, &regs);
 
-    if (tty) printf(A_BOLD A_YELLOW "  ◆ Calling function at 0x%016llx (orig stack).\n" A_RESET, (unsigned long long)addr);
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Calling function at 0x%016llx (orig stack).\n" A_RESET, (unsigned long long)addr);
     else printf("Calling function at 0x%016llx (orig stack).\n", (unsigned long long)addr);    
 
     ptrace(PTRACE_CONT, pid, NULL, NULL);
@@ -742,7 +741,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     int st; waitpid(pid, &st, __WALL);
     if (WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP) {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        if (tty) printf(A_BOLD A_GREEN "  ★ Call finished. RAX: 0x%llx\n" A_RESET, (unsigned long long)regs.rax);
+        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Call finished. RAX: 0x%llx\n" A_RESET, (unsigned long long)regs.rax);
         else printf("Call finished. RAX: 0x%llx\n", (unsigned long long)regs.rax);
     } else {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
@@ -882,7 +881,7 @@ size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle,
     procmaps_iterator *it = parse_maps_dump(indir);
     if (!it) return 0;
     size_t found = 0;
-    bool tty = is_tty();
+    
     procmaps_struct *map;
     char perms[5];
 
@@ -906,9 +905,9 @@ size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle,
             for (size_t i=0; i+nlen <= scan_len; i++) {
                 if (memcmp(buf+i, needle, nlen) == 0) {
                     uint64_t addr = (uint64_t)map->addr_start + i;
-                    if (tty) printf(A_BOLD A_GREEN);
+                    if (g_is_tty) printf(A_BOLD A_GREEN);
                     printf("%s offset=0x%zx addr=%016lx\n", cpath, i, (unsigned long)addr);
-                    if (tty) printf(A_RESET);
+                    if (g_is_tty) printf(A_RESET);
                     size_t ctx_start = (i >= 16) ? i - 16 : 0;
                     size_t ctx_len = (i + nlen + 16 <= scan_len) ? 32 : scan_len - ctx_start;
                     hexdump_line((uint64_t)map->addr_start + ctx_start, buf + ctx_start, ctx_len);

@@ -1,5 +1,7 @@
 #include "ckptmini.h"
 
+bool g_is_tty = false;
+
 static const reg_entry_t reg_table[] = {
     { "r15", 0x00 },
     { "r14", 0x08 },
@@ -356,8 +358,8 @@ void save_maps_and_memory(pid_t pid, const char *dir) {
 }
 
 void usage(const char *prog) {
-    bool tty = is_tty();
-    if (tty) fprintf(stderr, A_BOLD A_CYAN);
+    
+    if (g_is_tty) fprintf(stderr, A_BOLD A_CYAN);
     fprintf(stderr, "\n  %s ckptmini - Process checkpoint/restore tool\n\n" A_RESET, prog);
     
     fprintf(stderr, A_WHITE A_BOLD "  %s\n", "Core Commands:" A_RESET);
