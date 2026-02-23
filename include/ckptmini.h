@@ -85,6 +85,7 @@ void write_all_or_die(int fd, const void *buf, size_t sz);
 void read_all_or_die(int fd, void *buf, size_t sz);
 
 bool is_tty(void);
+extern bool g_is_tty;
 const char *hr_size(uint64_t bytes, char *buf, size_t bufsz);
 void hexdump_line(uint64_t base, const unsigned char *buf, size_t len);
 void print_timestamp(void);
