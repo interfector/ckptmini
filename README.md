@@ -218,12 +218,9 @@ make
 
 ## License
 
-ckptmini inherits the license from pmparser (used for memory map parsing):
+ckptmini inherits the license from [pmparser](https://github.com/ouadev/proc_maps_parser) (used for memory map parsing):
 
 ```
-@Author  : nex
-@date    : February 2026
-
 @Author  : ouadev
 @date    : December 2015
 
