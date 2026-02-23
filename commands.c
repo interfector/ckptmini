@@ -65,11 +65,7 @@ void cmd_dump(const char *arg) {
 
         printf("  %016lx %016lx  ", (unsigned long)s, (unsigned long)e);
         
-        perms[0] = map->is_r ? 'r' : '-';
-        perms[1] = map->is_w ? 'w' : '-';
-        perms[2] = map->is_x ? 'x' : '-';
-        perms[3] = map->is_p ? 'p' : '-';
-        perms[4] = '\0';
+        get_perms_string(map, perms);
         print_perms_colored(perms, g_is_tty);
 
         char szbuf[16]; hr_size(sz, szbuf, sizeof(szbuf));
@@ -923,7 +919,8 @@ size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle,
 
 bool search_bytes_in_map_cb(pid_t pid, uint64_t start, uint64_t end, const char *perms, const char *path, void *ud) {
     search_ctx_t *ctx = (search_ctx_t*)ud;
-    if (!mapping_matches_seg(perms, path, ctx->seg)) return true;
+    (void)path;
+    if (!mapping_matches_seg_perms(perms, ctx->seg)) return true;
     size_t len = (size_t)(end - start);
     unsigned char *buf = (unsigned char*)malloc(len);
     if (!read_bytes_from_pid(pid, start, buf, len)) { free(buf); return true; }

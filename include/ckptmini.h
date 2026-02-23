@@ -112,6 +112,7 @@ int prot_for_range(saved_map_t *maps, size_t nmaps, uint64_t start, uint64_t end
 
 bool read_bytes_from_pid(pid_t pid, uintptr_t addr, void *data, size_t len);
 bool write_bytes_to_pid(pid_t pid, uint64_t addr, const void *buf, size_t len);
+int get_memfd(pid_t pid, int flags);
 bool mem_write_region(pid_t pid, uint64_t addr, const void *data, size_t len);
 
 void load_regs(pid_t pid, const char *dir);
@@ -144,7 +145,8 @@ void step_pid(pid_t pid, int max_steps);
 
 size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen, const char *seg, size_t count);
 bool mapping_matches_seg_perms(const char *perms, const char *seg);
-bool mapping_matches_seg(const char *perms, const char *path, const char *seg);
+void get_perms_string(const procmaps_struct *map, char *perms);
+int find_chunk_for_addr(const char *memdir, uint64_t addr, size_t len, char *path, size_t path_sz, off_t *out_offset);
 bool search_bytes_in_map_cb(pid_t pid, uint64_t start, uint64_t end, const char *perms, const char *path, void *ud);
 
 void usage(const char *prog);
