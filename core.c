@@ -41,6 +41,20 @@ void checkpoint(pid_t pid, const char *outdir) {
     fprintf(stderr, "[ckpt] saved to %s\n", outdir);
 }
 
+/**
+ * @brief Execute syscall in remote process using ptrace
+ * 
+ * This function executes a syscall in the target process by:
+ * 1. Saving the original instruction at RIP
+ * 2. Replacing it with "syscall; int3" (0x0f05 + 0xcc = 0xCC050F...)
+ *    The int3 (0xCC) creates a breakpoint trap that stops execution
+ * 3. Setting register values to syscall number and arguments
+ * 4. Running the process until it hits the breakpoint
+ * 5. Reading the return value from RAX
+ * 6. Restoring the original instruction and registers
+ * 
+ * Note: This modifies the target process's memory temporarily!
+ */
 long remote_syscall_x64(pid_t pid, long nr,
                        unsigned long a1, unsigned long a2, unsigned long a3,
                        unsigned long a4, unsigned long a5, unsigned long a6) {
@@ -48,15 +62,23 @@ long remote_syscall_x64(pid_t pid, long nr,
     if (ptrace(PTRACE_GETREGS, pid, 0, &saved) == -1) DIE("PTRACE_GETREGS remote_syscall");
     regs = saved;
 
+    /* Save original instruction at RIP so we can restore it later */
     errno = 0;
     unsigned long orig_word = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)regs.rip, NULL);
     if (orig_word == (unsigned long)-1 && errno) DIE("PTRACE_PEEKTEXT");
 
+    /* 
+     * Create syscall trap: "syscall; int3"
+     *  - 0x0f05 = syscall instruction (x86_64)
+     *  - 0xcc = int3 (breakpoint)
+     * We keep upper bytes (likely REX prefix) and replace lower 3 bytes
+     */
     unsigned long inj = orig_word;
-    inj &= ~0xFFFFFFUL;
-    inj |= 0xCC050FUL;
+    inj &= ~0xFFFFFFUL;  /* Clear lower 3 bytes */
+    inj |= 0xCC050FUL;   /* syscall; int3 */
     if (ptrace(PTRACE_POKETEXT, pid, (void*)regs.rip, (void*)inj) == -1) DIE("PTRACE_POKETEXT");
 
+    /* Set syscall number in RAX, arguments in RDI, RSI, RDX, R10, R8, R9 */
     regs.rax = (unsigned long)nr;
     regs.rdi = a1;
     regs.rsi = a2;
