@@ -395,12 +395,27 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
     ptrace(PTRACE_DETACH, pid, NULL, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
 }
 
+/**
+ * @brief Inject and execute shellcode in a running process
+ * 
+ * This function performs runtime code injection:
+ * 1. Attach to target process via ptrace
+ * 2. Allocate executable memory using mmap (via remote_syscall_x64)
+ * 3. Write shellcode to the allocated memory
+ * 4. Verify the write succeeded (read back and compare)
+ * 5. Hijack RIP to point to our shellcode
+ * 6. Run until breakpoint trap (SIGTRAP)
+ * 7. Restore original registers and clean up
+ * 
+ * The shellcode is followed by 0xCC (int3) to act as a "stop" breakpoint.
+ * This allows us to detect when the shellcode finishes execution.
+ */
 void cmd_inject_shellcode(pid_t pid, const char *hex) {
     size_t slen = 0;
     unsigned char *shellcode = parse_hex(hex, &slen);
     if (!shellcode) { fprintf(stderr, "inject_shellcode: invalid hex strings\n"); return; }
 
-    
+    /* Attach to target process */
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "inject: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "inject: no such process %d\n", pid); }
@@ -413,19 +428,25 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
     if (ptrace(PTRACE_GETREGS, pid, 0, &saved_regs) == -1) DIE("PTRACE_GETREGS inject");
     regs = saved_regs;
 
+    /* Step 1: Allocate executable memory in target process
+     * We use mmap with PROT_READ|PROT_WRITE|PROT_EXEC to create
+     * a region where we can write and execute our shellcode */
     uint64_t pocket = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)pocket < 0) {
         fprintf(stderr, "inject: remote mmap failed (ret=%ld)\n", (long)pocket);
         ptrace(PTRACE_DETACH, pid, NULL, NULL); free(shellcode); return;
     }
 
+    /* Step 2: Copy shellcode to buffer, append int3 breakpoint */
     unsigned char *payload = (unsigned char*)malloc(slen + 1);
     memcpy(payload, shellcode, slen);
-    payload[slen] = 0xCC;
+    payload[slen] = 0xCC;  /* int3 - acts as our "done" breakpoint */
 
+    /* Step 3: Write shellcode to allocated memory */
     if (!write_bytes_to_pid(pid, pocket, payload, slen + 1)) {
         fprintf(stderr, "inject: write failed at 0x%016llx\n", (unsigned long long)pocket);
     } else {
+        /* Verify the write succeeded by reading back */
         unsigned char *verify = (unsigned char*)malloc(slen + 1);
         if (read_bytes_from_pid(pid, pocket, verify, slen + 1)) {
             if (memcmp(payload, verify, slen + 1) != 0) {
@@ -437,21 +458,24 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
         if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Injecting %zu bytes at 0x%016llx. Running...\n" A_RESET, slen, (unsigned long long)pocket);
         else printf("Injecting %zu bytes at 0x%016llx. Running...\n", slen, (unsigned long long)pocket);
 
+        /* Step 4: Hijack execution - set RIP to our shellcode */
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) DIE("PTRACE_GETREGS hijack");
         regs.rip = pocket;
         #if defined(__x86_64__)
-        regs.rax = -1; 
-        regs.orig_rax = -1;
+        regs.rax = -1;       /* Clear return value so syscall returns work */
+        regs.orig_rax = -1;  /* Mark as syscall instruction */
         #endif
 
         if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) DIE("PTRACE_SETREGS hijack");
         if (ptrace(PTRACE_CONT, pid, NULL, NULL) == -1) DIE("PTRACE_CONT hijack");
 
+        /* Wait for shellcode to hit our int3 breakpoint */
         waitpid(pid, &st, __WALL);
         if (WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP) {
             if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Shellcode hit TRAP. Restoring state.\n" A_RESET);
             else printf("Shellcode hit TRAP. Restoring state.\n");
         } else {
+            /* Shellcode crashed or was interrupted */
             int sig = WIFSTOPPED(st) ? WSTOPSIG(st) : (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
             printf("  ⚠ Shellcode stopped for non-trap reason (status=0x%x, sig=%d).\n", st, sig);
             regs_t crashed_regs;
@@ -463,9 +487,13 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
         }
     }
 
+    /* Step 5: Restore original registers */
     if (ptrace(PTRACE_SETREGS, pid, 0, &saved_regs) == -1) DIE("PTRACE_SETREGS restore");
+    
+    /* Step 6: Free the allocated memory */
     (void)remote_syscall_x64(pid, __NR_munmap, pocket, 4096, 0, 0, 0, 0);
 
+    /* Step 7: Detach, preserving signal state if needed */
     ptrace(PTRACE_DETACH, pid, NULL, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
     free(shellcode); free(payload);
 }
@@ -760,6 +788,20 @@ uintptr_t cmd_call(pid_t pid, uint64_t addr, int argc, char **argv, bool detach)
     return cmd_call_ret(pid, addr, argc, argv, detach, NULL);
 }
 
+/**
+ * @brief Load a shared library (.so) into a running process
+ * 
+ * This function dynamically loads a shared library into a target process:
+ * 1. Resolve the .so path to absolute path
+ * 2. Attach to process if not already attached
+ * 3. Find libc.so addresses in both local and remote processes
+ *    (we need this because ASLR means addresses differ)
+ * 4. Calculate offset to dlopen within libc
+ * 5. Call dlopen in remote process via remote_syscall_x64
+ * 
+ * This is powerful for runtime instrumentation, debugging, or
+ * extending functionality without restarting the target.
+ */
 void cmd_load_so(pid_t pid, const char *so_path) {
     char line[1024];
 
