@@ -606,13 +606,6 @@ info "Test 34: incr_restore"
 SPAWN_PID=$!
 sleep 0.5
 
-# Start a killer in case it hangs
-(
-    sleep 3
-    if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
-        kill -9 "$SPAWN_PID" 2>/dev/null || true
-    fi
-) &
 KILLER_PID=$!
 
 if kill -0 "$SPAWN_PID" 2>/dev/null && [ -d "$INCR_DELTA_DIR" ]; then
@@ -630,9 +623,9 @@ fi
 
 # Clean up
 kill -9 "$KILLER_PID" 2>/dev/null || true
-if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
-    kill -9 "$SPAWN_PID" 2>/dev/null || true
-fi
+#if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+#    kill -9 "$SPAWN_PID" 2>/dev/null || true
+#fi
 
 #######################################
 # SUMMARY
