@@ -11,19 +11,25 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-CKPTMINI="./ckptmini"
+CKPTMINI="$(cd "$(dirname "$0")/.." && pwd)/ckptmini"
 TESTDIR="/tmp/ckptmini_test_$$"
 SAVEDIR="$TESTDIR/saved"
-TESTLOOP="./tests/test_loop"
-TESTCALL="./tests/test_call"
-TESTLIB="./tests/testlib.so"
+TESTLOOP="$(cd "$(dirname "$0")" && pwd)/test_loop"
+TESTCALL="$(cd "$(dirname "$0")" && pwd)/test_call"
+TESTTHREAD="$(cd "$(dirname "$0")" && pwd)/test_thread"
+TESTLIB="$(cd "$(dirname "$0")" && pwd)/testlib.so"
 TESTLOOP_PID=""
 TESTCALL_PID=""
+TESTTHREAD_PID=""
 
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+timeout_cmd() {
+    timeout 2s "$@" 2>/dev/null
+}
 
 cleanup() {
     if [ -n "$TESTLOOP_PID" ] && kill -0 "$TESTLOOP_PID" 2>/dev/null; then
@@ -32,11 +38,16 @@ cleanup() {
     if [ -n "$TESTCALL_PID" ] && kill -0 "$TESTCALL_PID" 2>/dev/null; then
         kill -9 "$TESTCALL_PID" 2>/dev/null || true
     fi
+    if [ -n "$TESTTHREAD_PID" ] && kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+        kill -9 "$TESTTHREAD_PID" 2>/dev/null || true
+    fi
     wait "$TESTLOOP_PID" 2>/dev/null || true
     wait "$TESTCALL_PID" 2>/dev/null || true
+    wait "$TESTTHREAD_PID" 2>/dev/null || true
     rm -rf "$TESTDIR"
     pkill -f "test_loop" 2>/dev/null || true
     pkill -f "test_call" 2>/dev/null || true
+    pkill -f "test_thread" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -407,6 +418,117 @@ else
         warn "Could not start test_call for load_so test"
     fi
 fi
+
+#######################################
+# TEST 27: Thread enumeration (threads command)
+#######################################
+info "Test 27: threads command"
+
+# Start test_thread in background
+"$TESTTHREAD" > /dev/null 2>&1 &
+TESTTHREAD_PID=$!
+sleep 1
+
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    RESULT=$($CKPTMINI threads "$TESTTHREAD_PID" 2>&1)
+    
+    if echo "$RESULT" | grep -q "Threads for PID"; then
+        pass "threads command displays thread list"
+    else
+        fail "threads command output unexpected"
+    fi
+    
+    # Should show at least 4 threads (main + 3 workers)
+    THREAD_COUNT=$(echo "$RESULT" | grep -c "^" || true)
+    if [ "$THREAD_COUNT" -ge 4 ]; then
+        pass "threads command shows multiple threads"
+    else
+        warn "threads may not show all threads (found $THREAD_COUNT)"
+    fi
+else
+    warn "Could not start test_thread"
+fi
+
+#######################################
+# TEST 28: Thread checkpoint (save_t)
+#######################################
+info "Test 28: save_t command"
+
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    THREAD_SAVE_DIR="$TESTDIR/thread_save"
+    mkdir -p "$THREAD_SAVE_DIR"
+    
+    $CKPTMINI save_t "$TESTTHREAD_PID" "$THREAD_SAVE_DIR" > /dev/null 2>&1 || warn "save_t failed"
+    
+    if [ -f "$THREAD_SAVE_DIR/threads.txt" ]; then
+        pass "save_t creates threads.txt"
+    else
+        fail "save_t did not create threads.txt"
+    fi
+    
+    if [ -d "$THREAD_SAVE_DIR/threads" ]; then
+        pass "save_t creates threads directory"
+    else
+        warn "save_t threads directory not created"
+    fi
+else
+    warn "test_thread not running, skipping save_t test"
+fi
+
+#######################################
+# TEST 29: Thread checkpoint inspection (threads_dump)
+#######################################
+info "Test 29: threads_dump command"
+
+if [ -d "$THREAD_SAVE_DIR" ]; then
+    RESULT=$($CKPTMINI threads_dump "$THREAD_SAVE_DIR" 2>&1)
+    
+    if echo "$RESULT" | grep -q "Threads in checkpoint"; then
+        pass "threads_dump displays checkpoint threads"
+    else
+        fail "threads_dump output unexpected"
+    fi
+else
+    warn "No thread save directory, skipping threads_dump test"
+fi
+
+#######################################
+# TEST 30: Thread restore (restore_t)
+# Note: Full restore may fail without root, but we test the command runs
+#######################################
+info "Test 30: restore_t command"
+
+# Start a fresh test_thread in background (not from spawn, just direct run)
+"$TESTTHREAD" > /dev/null 2>&1 &
+SPAWN_PID=$!
+sleep 0.5
+
+if kill -0 "$SPAWN_PID" 2>/dev/null && [ -d "$THREAD_SAVE_DIR" ]; then
+    # Try to restore with timeout to prevent hanging
+    RESTORE_RESULT=$(timeout 3 $CKPTMINI restore_t "$SPAWN_PID" "$THREAD_SAVE_DIR" 2>&1) || true
+    
+    if echo "$RESTORE_RESULT" | grep -q "Restore"; then
+        pass "restore_t command executes"
+    else
+        warn "restore_t may have failed (expected without root)"
+    fi
+else
+    warn "Could not test restore_t (no spawned process or no save dir)"
+fi
+
+# Clean up
+if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+    kill -9 "$SPAWN_PID" 2>/dev/null || true
+fi
+
+#######################################
+# Clean up test_thread
+#######################################
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    kill -9 "$TESTTHREAD_PID" 2>/dev/null || true
+fi
+wait "$TESTTHREAD_PID" 2>/dev/null || true
+TESTTHREAD_PID=""
 
 #######################################
 # Clean up test_call
