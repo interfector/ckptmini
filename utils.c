@@ -159,7 +159,7 @@ int parse_perms(const char *s) {
     return prot;
 }
 
-static bool region_is_minimal_target_pm(const procmaps_struct *map) {
+bool region_is_minimal_target_pm(const procmaps_struct *map) {
     if (!map->is_r) return false;
     if (map->map_type == PROCMAPS_MAP_HEAP || map->map_type == PROCMAPS_MAP_STACK ||
         map->map_type == PROCMAPS_MAP_STACK_TID) return true;
@@ -301,7 +301,7 @@ int get_memfd(pid_t pid, int flags) {
     return open(memp, flags);
 }
 
-static size_t dump_bytes_from_mem(pid_t pid, int memfd, uint64_t start, void *buf, size_t len) {
+size_t dump_bytes_from_mem(pid_t pid, int memfd, uint64_t start, void *buf, size_t len) {
     (void)pid;
     ssize_t n = pread(memfd, buf, len, (off_t)start);
     if (n < 0) {
@@ -313,7 +313,7 @@ static size_t dump_bytes_from_mem(pid_t pid, int memfd, uint64_t start, void *bu
     return (size_t)n;
 }
 
-static size_t dump_region_bin(const char *dir, const region_t *rg, const void *data, size_t len) {
+size_t dump_region_bin(const char *dir, const region_t *rg, const void *data, size_t len) {
     char name[512]; snprintf(name, sizeof(name), "%s/mem/%016llx-%016llx.bin", dir,
                              (unsigned long long)rg->start, (unsigned long long)rg->end);
     int fd = open(name, O_CREAT|O_TRUNC|O_WRONLY, 0644); if (fd < 0) DIE("open mem bin");
@@ -395,6 +395,8 @@ void usage(const char *prog) {
     fprintf(stderr, A_WHITE A_BOLD "  %s\n", "Core Commands:" A_RESET);
     fprintf(stderr, "  %-24s %s\n", "save <pid> <outdir>", "Save process memory & regs to directory");
     fprintf(stderr, "  %-24s %s\n", "restore <pid> <dir>", "Restore saved state to process");
+    fprintf(stderr, "  %-24s %s\n", "incr_save <pid> <out> <base>", "Incremental save (only changes)");
+    fprintf(stderr, "  %-24s %s\n", "incr_restore <pid> <dir>", "Restore from inc. checkpoint");
     fprintf(stderr, "  %-24s %s\n", "dump <pid|dir>", "Show memory regions with colors");
     fprintf(stderr, "  %-24s %s\n", "show <pid>", "Show maps and registers");
     fprintf(stderr, "  %-24s %s\n", "show_dump <dir>", "Show saved maps and registers");

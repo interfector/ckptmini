@@ -739,3 +739,359 @@ void show_maps_and_regs(show_mode_t mode, const char *arg) {
     printf("R14: %016llx\n", (unsigned long long)regs.r14);
     printf("R15: %016llx\n", (unsigned long long)regs.r15);
 }
+
+static bool region_matches_baseline(uint64_t start, uint64_t end, procmaps_iterator *base_it) {
+    procmaps_struct *base;
+    while ((base = pmparser_next(base_it)) != NULL) {
+        if ((uint64_t)base->addr_start == start && (uint64_t)base->addr_end == end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int compare_memory_region(pid_t pid, int memfd, uint64_t addr, const void *baseline_data, size_t len) {
+    unsigned char *current = malloc(len);
+    if (!current) return -1;
+    
+    ssize_t got = dump_bytes_from_mem(pid, memfd, addr, current, len);
+    int changed = 0;
+    
+    if ((size_t)got == len) {
+        if (memcmp(current, baseline_data, len) != 0) {
+            changed = 1;
+        }
+    } else {
+        changed = 1;
+    }
+    
+    free(current);
+    return changed;
+}
+
+bool is_incremental_checkpoint(const char *dir) {
+    char meta[512];
+    snprintf(meta, sizeof(meta), "%s/is_incremental", dir);
+    struct stat st;
+    if (stat(meta, &st) == 0) {
+        return true;
+    }
+    return false;
+}
+
+int get_baseline_dir(const char *dir, char *out, size_t out_sz) {
+    char meta[512];
+    snprintf(meta, sizeof(meta), "%s/baseline", dir);
+    
+    FILE *f = fopen(meta, "r");
+    if (!f) return -1;
+    
+    if (fgets(out, (int)out_sz, f)) {
+        size_t len = strlen(out);
+        if (len > 0 && out[len-1] == '\n') out[len-1] = '\0';
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return -1;
+}
+
+void incremental_checkpoint(pid_t pid, const char *outdir, const char *baseline_dir) {
+    mkpath_or_die(outdir);
+    
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
+    waitpid(pid, NULL, 0);
+    
+    if (baseline_dir) {
+        FILE *f = fopen("/tmp/is_incremental", "w");
+        if (f) fclose(f);
+        
+        char meta[512];
+        snprintf(meta, sizeof(meta), "%s/is_incremental", outdir);
+        f = fopen(meta, "w");
+        if (f) {
+            fprintf(f, "1\n");
+            fclose(f);
+        }
+        
+        snprintf(meta, sizeof(meta), "%s/baseline", outdir);
+        f = fopen(meta, "w");
+        if (f) {
+            fprintf(f, "%s\n", baseline_dir);
+            fclose(f);
+        }
+    }
+    
+    save_meta(pid, outdir);
+    save_regs(pid, outdir);
+    
+    char maps_out[512]; snprintf(maps_out, sizeof(maps_out), "%s/maps.txt", outdir);
+    FILE *fout = fopen(maps_out, "w"); if (!fout) DIE("fopen maps.txt");
+    
+    char memdir[512]; snprintf(memdir, sizeof(memdir), "%s/mem", outdir); mkpath_or_die(memdir);
+    
+    char mem_p[256]; snprintf(mem_p, sizeof(mem_p), "/proc/%d/mem", pid);
+    int memfd = open(mem_p, O_RDONLY); if (memfd < 0) DIE("open /proc/pid/mem");
+    
+    procmaps_iterator *it = parse_maps_live(pid);
+    if (!it) DIE("parse_maps_live");
+    
+    procmaps_iterator *base_it = NULL;
+    int *region_changed = NULL;
+    size_t num_regions = 0;
+    
+    if (baseline_dir) {
+        base_it = parse_maps_dump(baseline_dir);
+        
+        procmaps_struct *map;
+        while ((map = pmparser_next(it)) != NULL) num_regions++;
+        pmparser_free(it);
+        
+        region_changed = calloc(num_regions, sizeof(int));
+        it = parse_maps_live(pid);
+    }
+    
+    procmaps_struct *map;
+    char line[1024];
+    size_t idx = 0;
+    size_t changed_count = 0;
+    size_t total_size = 0;
+    size_t saved_size = 0;
+    
+    while ((map = pmparser_next(it)) != NULL) {
+        snprintf(line, sizeof(line), "%lx-%lx %c%c%c%c %lx %x:%x %llu %s\n",
+                 (unsigned long)map->addr_start, (unsigned long)map->addr_end,
+                 map->is_r ? 'r' : '-', map->is_w ? 'w' : '-', map->is_x ? 'x' : '-', map->is_p ? 'p' : '-',
+                 (unsigned long)map->offset, map->dev_major, map->dev_minor,
+                 map->inode, map->pathname ? map->pathname : "");
+        fputs(line, fout);
+        
+        if (!region_is_minimal_target_pm(map)) {
+            idx++;
+            continue;
+        }
+        
+        size_t len = map->length;
+        void *buf = malloc(len);
+        ssize_t got = dump_bytes_from_mem(pid, memfd, (uint64_t)map->addr_start, buf, len);
+        
+        if (got <= 0) {
+            free(buf);
+            idx++;
+            continue;
+        }
+        
+        if ((size_t)got != len) {
+            memset((char*)buf + got, 0, len - (size_t)got);
+        }
+        
+        total_size += len;
+        int should_save = 1;
+        
+        if (baseline_dir && base_it) {
+            procmaps_iterator *check_it = parse_maps_dump(baseline_dir);
+            procmaps_struct *base_map;
+            int found_in_baseline = 0;
+            
+            while ((base_map = pmparser_next(check_it)) != NULL) {
+                if ((uint64_t)base_map->addr_start == (uint64_t)map->addr_start &&
+                    (uint64_t)base_map->addr_end == (uint64_t)map->addr_end) {
+                    found_in_baseline = 1;
+                    
+                    char binfile[512];
+                    snprintf(binfile, sizeof(binfile), "%s/mem/%016llx-%016llx.bin", 
+                             baseline_dir, (unsigned long long)map->addr_start, (unsigned long long)map->addr_end);
+                    
+                    int bfd = open(binfile, O_RDONLY);
+                    if (bfd >= 0) {
+                        void *baseline_data = malloc(len);
+                        ssize_t baseline_read = read(bfd, baseline_data, len);
+                        close(bfd);
+                        
+                        if (baseline_read == len) {
+                            if (memcmp(buf, baseline_data, len) == 0) {
+                                should_save = 0;
+                                saved_size += len;
+                            }
+                        }
+                        free(baseline_data);
+                    }
+                    break;
+                }
+            }
+            pmparser_free(check_it);
+            
+            if (!found_in_baseline) {
+                should_save = 1;
+            }
+        }
+        
+        if (should_save) {
+            region_t rg = { .start = (uint64_t)map->addr_start, .end = (uint64_t)map->addr_end, 
+                           .prot = pmparser_get_prot(map), .dump = true };
+            if (map->pathname) strncpy(rg.name, map->pathname, sizeof(rg.name)-1);
+            dump_region_bin(outdir, &rg, buf, len);
+            changed_count++;
+        }
+        
+        free(buf);
+        idx++;
+    }
+    
+    if (region_changed) free(region_changed);
+    if (base_it) pmparser_free(base_it);
+    
+    pmparser_free(it);
+    close(memfd);
+    fclose(fout);
+    
+    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    
+    if (baseline_dir) {
+        fprintf(stderr, "[incr-ckpt] saved incremental to %s\n", outdir);
+        fprintf(stderr, "[incr-ckpt] changed regions: %zu/%zu, saved %zu bytes (baseline was %zu bytes)\n",
+                changed_count, idx, total_size - saved_size, saved_size);
+    } else {
+        fprintf(stderr, "[incr-ckpt] saved baseline to %s\n", outdir);
+    }
+}
+
+static void incremental_restore_regions(pid_t pid, const char *indir, const char *base_dir) {
+    char memdir[512];
+    if (base_dir) {
+        snprintf(memdir, sizeof(memdir), "%s/mem", base_dir);
+    } else {
+        snprintf(memdir, sizeof(memdir), "%s/mem", indir);
+    }
+    
+    char maps_path[512];
+    snprintf(maps_path, sizeof(maps_path), "%s/maps.txt", base_dir ? base_dir : indir);
+    
+    procmaps_iterator *it = parse_maps_dump(base_dir ? base_dir : indir);
+    if (!it) {
+        fprintf(stderr, "[incr-restore] warning: could not parse maps\n");
+        return;
+    }
+    
+    int memfd = get_memfd(pid, O_RDWR);
+    if (memfd < 0) memfd = get_memfd(pid, O_WRONLY);
+    if (memfd < 0) DIE("get_memfd");
+    
+    procmaps_struct *map;
+    while ((map = pmparser_next(it)) != NULL) {
+        if (!region_is_minimal_target_pm(map)) continue;
+        
+        char binfile[512];
+        uint64_t addr = (uint64_t)map->addr_start;
+        uint64_t end = (uint64_t)map->addr_end;
+        size_t len = map->length;
+        
+        snprintf(binfile, sizeof(binfile), "%s/%016llx-%016llx.bin", memdir, 
+                 (unsigned long long)addr, (unsigned long long)end);
+        
+        struct stat st;
+        if (stat(binfile, &st) != 0) {
+            continue;
+        }
+        
+        int prot = pmparser_get_prot(map);
+        if (prot <= 0) prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+        
+        if (remote_mprotect(pid, addr, len, prot | PROT_WRITE) == -1) {
+            continue;
+        }
+        
+        int srcfd = open(binfile, O_RDONLY);
+        if (srcfd < 0) {
+            remote_mprotect(pid, addr, len, prot);
+            continue;
+        }
+        
+        void *buf = malloc(len);
+        ssize_t r = read(srcfd, buf, len);
+        close(srcfd);
+        
+        if (r > 0) {
+            mem_write_region(pid, addr, buf, (size_t)r);
+        }
+        
+        free(buf);
+        remote_mprotect(pid, addr, len, prot);
+    }
+    
+    if (base_dir) {
+        procmaps_iterator *incr_it = parse_maps_dump(indir);
+        if (incr_it) {
+            while ((map = pmparser_next(incr_it)) != NULL) {
+                if (!region_is_minimal_target_pm(map)) continue;
+                
+                char binfile[512];
+                uint64_t addr = (uint64_t)map->addr_start;
+                uint64_t end = (uint64_t)map->addr_end;
+                size_t len = map->length;
+                
+                snprintf(binfile, sizeof(binfile), "%s/mem/%016llx-%016llx.bin", 
+                         indir, (unsigned long long)addr, (unsigned long long)end);
+                
+                struct stat st;
+                if (stat(binfile, &st) != 0) {
+                    continue;
+                }
+                
+                int prot = pmparser_get_prot(map);
+                if (prot <= 0) prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+                
+                if (remote_mprotect(pid, addr, len, prot | PROT_WRITE) == -1) {
+                    continue;
+                }
+                
+                int srcfd = open(binfile, O_RDONLY);
+                if (srcfd < 0) {
+                    remote_mprotect(pid, addr, len, prot);
+                    continue;
+                }
+                
+                void *buf = malloc(len);
+                ssize_t r = read(srcfd, buf, len);
+                close(srcfd);
+                
+                if (r > 0) {
+                    mem_write_region(pid, addr, buf, (size_t)r);
+                }
+                
+                free(buf);
+                remote_mprotect(pid, addr, len, prot);
+            }
+            pmparser_free(incr_it);
+        }
+    }
+    
+    pmparser_free(it);
+    close(memfd);
+}
+
+void incremental_restore(pid_t pid, const char *indir) {
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
+    waitpid(pid, NULL, 0);
+    
+    char base_dir[512] = {0};
+    int is_incr = is_incremental_checkpoint(indir);
+    
+    if (is_incr) {
+        if (get_baseline_dir(indir, base_dir, sizeof(base_dir)) == 0) {
+            fprintf(stderr, "[incr-restore] using baseline: %s\n", base_dir);
+            load_regs(pid, base_dir);
+            incremental_restore_regions(pid, indir, base_dir);
+        } else {
+            fprintf(stderr, "[incr-restore] error: incremental but no baseline found\n");
+            if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+            return;
+        }
+    } else {
+        load_regs(pid, indir);
+        incremental_restore_regions(pid, indir, NULL);
+    }
+    
+    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    fprintf(stderr, "[incr-restore] done\n");
+}
