@@ -437,12 +437,16 @@ void usage(const char *prog) {
     fprintf(stderr, "  %-24s %s\n", "signals <pid>", "Show pending signals");
     fprintf(stderr, "  %-24s %s\n", "fds <pid>", "Show open file descriptors");
     fprintf(stderr, "  %-24s %s\n", "snapshot_diff <pid> <dir>", "Diff current vs saved memory");
-    fprintf(stderr, "  %-24s %s\n", "threads <pid>", "Show threads of a process");
-    fprintf(stderr, "  %-24s %s\n", "threads_dump <dir>", "Show threads in checkpoint");
     
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Thread Checkpoint:");
     fprintf(stderr, "  %-24s %s\n", "save_t <pid> <dir>", "Save process with threads");
     fprintf(stderr, "  %-24s %s\n", "restore_t <pid> <dir>", "Restore with threads");
+    fprintf(stderr, "  %-24s %s\n", "threads <pid>", "Show threads of a process");
+    fprintf(stderr, "  %-24s %s\n", "threads_dump <dir>", "Show threads in checkpoint");
+    
+    fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Incremental Checkpoint:");
+    fprintf(stderr, "  %-24s %s\n", "incr_save <pid> <dir> <base>", "Save incremental checkpoint");
+    fprintf(stderr, "  %-24s %s\n", "incr_restore <pid> <dir>", "Restore incremental checkpoint");
     
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Advanced:");
     fprintf(stderr, "  %-24s %s\n", "call <pid> <addr> [args]", "Call function in target");

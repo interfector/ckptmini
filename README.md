@@ -23,7 +23,6 @@ This saves:
 - Process command line and environment
 
 **Limitations:**
-- Single-threaded processes only
 - Does not preserve open file descriptors
 - Does not preserve signal handlers or pending signals
 - ASLR may cause issues on restore if addresses differ
@@ -35,11 +34,37 @@ This saves:
 | Command | Description |
 |---------|-------------|
 | `save <pid> <dir>` | Save complete process state (registers, memory, metadata) to directory |
+| `save_t <pid> <dir>` | Save process with thread support |
 | `restore <pid> <dir>` | Restore saved checkpoint into a running process |
+| `restore_t <pid> <dir>` | Restore with thread support |
 | `replay <prog> <dir>` | Fork and exec program, then restore checkpoint into it |
 | `relocate <pid> <dir>` | Restore memory layout from dump into a different process |
 
-**Limitations:** All save/restore commands above are single-threaded only.
+### Incremental Checkpoints
+
+| Command | Description |
+|---------|-------------|
+| `incr_save <pid> <dir> <baseline>` | Save incremental checkpoint (only changed pages) |
+| `incr_restore <pid> <dir>` | Restore incremental checkpoint |
+
+Example:
+```bash
+# Save baseline checkpoint
+./ckptmini save 12345 /tmp/baseline
+# Save incremental (only changed pages compared to baseline)
+./ckptmini incr_save 12345 /tmp/delta /tmp/baseline
+# Restore incremental
+./ckptmini incr_restore 12345 /tmp/delta
+```
+
+### Thread Support
+
+| Command | Description |
+|---------|-------------|
+| `threads <pid>` | Show threads of a live process |
+| `threads_dump <dir>` | Show threads in a checkpoint |
+
+**Note:** Thread support is experimental. Full restoration requires elevated ptrace permissions.
 
 ### Process Control
 
@@ -207,12 +232,10 @@ make
 
 ## Possible New Features
 
-- **Thread support** - Handle multi-threaded processes
 - **File descriptor restoration** - Save and restore open FDs
 - **Signal state preservation** - Pending signals, handlers, masks
 - **Child process trees** - Checkpoint entire process groups
 - **Memory compression** - Compress saved regions
-- **Incremental checkpoints** - Diff-based snapshots
 - **CRIU compatibility** - Import/export CRIU format
 - **Live migration** - Checkpoint, transfer, restore over network
 
