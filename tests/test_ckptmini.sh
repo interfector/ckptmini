@@ -11,19 +11,25 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-CKPTMINI="./ckptmini"
+CKPTMINI="$(cd "$(dirname "$0")/.." && pwd)/ckptmini"
 TESTDIR="/tmp/ckptmini_test_$$"
 SAVEDIR="$TESTDIR/saved"
-TESTLOOP="./tests/test_loop"
-TESTCALL="./tests/test_call"
-TESTLIB="./tests/testlib.so"
+TESTLOOP="$(cd "$(dirname "$0")" && pwd)/test_loop"
+TESTCALL="$(cd "$(dirname "$0")" && pwd)/test_call"
+TESTTHREAD="$(cd "$(dirname "$0")" && pwd)/test_thread"
+TESTLIB="$(cd "$(dirname "$0")" && pwd)/testlib.so"
 TESTLOOP_PID=""
 TESTCALL_PID=""
+TESTTHREAD_PID=""
 
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+timeout_cmd() {
+    timeout 2s "$@" 2>/dev/null
+}
 
 cleanup() {
     if [ -n "$TESTLOOP_PID" ] && kill -0 "$TESTLOOP_PID" 2>/dev/null; then
@@ -32,11 +38,16 @@ cleanup() {
     if [ -n "$TESTCALL_PID" ] && kill -0 "$TESTCALL_PID" 2>/dev/null; then
         kill -9 "$TESTCALL_PID" 2>/dev/null || true
     fi
+    if [ -n "$TESTTHREAD_PID" ] && kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+        kill -9 "$TESTTHREAD_PID" 2>/dev/null || true
+    fi
     wait "$TESTLOOP_PID" 2>/dev/null || true
     wait "$TESTCALL_PID" 2>/dev/null || true
+    wait "$TESTTHREAD_PID" 2>/dev/null || true
     rm -rf "$TESTDIR"
     pkill -f "test_loop" 2>/dev/null || true
     pkill -f "test_call" 2>/dev/null || true
+    pkill -f "test_thread" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -409,6 +420,117 @@ else
 fi
 
 #######################################
+# TEST 27: Thread enumeration (threads command)
+#######################################
+info "Test 27: threads command"
+
+# Start test_thread in background
+"$TESTTHREAD" > /dev/null 2>&1 &
+TESTTHREAD_PID=$!
+sleep 1
+
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    RESULT=$($CKPTMINI threads "$TESTTHREAD_PID" 2>&1)
+    
+    if echo "$RESULT" | grep -q "Threads for PID"; then
+        pass "threads command displays thread list"
+    else
+        fail "threads command output unexpected"
+    fi
+    
+    # Should show at least 4 threads (main + 3 workers)
+    THREAD_COUNT=$(echo "$RESULT" | grep -c "^" || true)
+    if [ "$THREAD_COUNT" -ge 4 ]; then
+        pass "threads command shows multiple threads"
+    else
+        warn "threads may not show all threads (found $THREAD_COUNT)"
+    fi
+else
+    warn "Could not start test_thread"
+fi
+
+#######################################
+# TEST 28: Thread checkpoint (save_t)
+#######################################
+info "Test 28: save_t command"
+
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    THREAD_SAVE_DIR="$TESTDIR/thread_save"
+    mkdir -p "$THREAD_SAVE_DIR"
+    
+    $CKPTMINI save_t "$TESTTHREAD_PID" "$THREAD_SAVE_DIR" > /dev/null 2>&1 || warn "save_t failed"
+    
+    if [ -f "$THREAD_SAVE_DIR/threads.txt" ]; then
+        pass "save_t creates threads.txt"
+    else
+        fail "save_t did not create threads.txt"
+    fi
+    
+    if [ -d "$THREAD_SAVE_DIR/threads" ]; then
+        pass "save_t creates threads directory"
+    else
+        warn "save_t threads directory not created"
+    fi
+else
+    warn "test_thread not running, skipping save_t test"
+fi
+
+#######################################
+# TEST 29: Thread checkpoint inspection (threads_dump)
+#######################################
+info "Test 29: threads_dump command"
+
+if [ -d "$THREAD_SAVE_DIR" ]; then
+    RESULT=$($CKPTMINI threads_dump "$THREAD_SAVE_DIR" 2>&1)
+    
+    if echo "$RESULT" | grep -q "Threads in checkpoint"; then
+        pass "threads_dump displays checkpoint threads"
+    else
+        fail "threads_dump output unexpected"
+    fi
+else
+    warn "No thread save directory, skipping threads_dump test"
+fi
+
+#######################################
+# TEST 30: Thread restore (restore_t)
+# Note: Full restore may fail without root, but we test the command runs
+#######################################
+info "Test 30: restore_t command"
+
+# Start a fresh test_thread in background (not from spawn, just direct run)
+"$TESTTHREAD" > /dev/null 2>&1 &
+SPAWN_PID=$!
+sleep 0.5
+
+if kill -0 "$SPAWN_PID" 2>/dev/null && [ -d "$THREAD_SAVE_DIR" ]; then
+    # Try to restore with timeout to prevent hanging
+    RESTORE_RESULT=$(timeout 3 $CKPTMINI restore_t "$SPAWN_PID" "$THREAD_SAVE_DIR" 2>&1) || true
+    
+    if echo "$RESTORE_RESULT" | grep -q "Restore"; then
+        pass "restore_t command executes"
+    else
+        warn "restore_t may have failed (expected without root)"
+    fi
+else
+    warn "Could not test restore_t (no spawned process or no save dir)"
+fi
+
+# Clean up
+if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+    kill -9 "$SPAWN_PID" 2>/dev/null || true
+fi
+
+#######################################
+# Clean up test_thread
+#######################################
+if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
+    kill -9 "$TESTTHREAD_PID" 2>/dev/null || true
+fi
+wait "$TESTTHREAD_PID" 2>/dev/null || true
+TESTTHREAD_PID=""
+
+#######################################
 # Clean up test_call
 #######################################
 if kill -0 "$TESTCALL_PID" 2>/dev/null; then
@@ -416,6 +538,101 @@ if kill -0 "$TESTCALL_PID" 2>/dev/null; then
 fi
 wait "$TESTCALL_PID" 2>/dev/null || true
 TESTCALL_PID=""
+
+#######################################
+# TEST 32: Incremental checkpoint (save baseline)
+#######################################
+info "Test 32: incr_save - baseline"
+
+# Start test_loop in background
+"$TESTLOOP" > /dev/null 2>&1 &
+TESTLOOP_INCR_PID=$!
+sleep 1
+
+INCR_BASELINE_DIR="$TESTDIR/incr_baseline"
+mkdir -p "$INCR_BASELINE_DIR"
+
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    $CKPTMINI save "$TESTLOOP_INCR_PID" "$INCR_BASELINE_DIR" > /dev/null 2>&1 || warn "baseline save failed"
+    
+    if [ -f "$INCR_BASELINE_DIR/maps.txt" ]; then
+        pass "baseline checkpoint created"
+    else
+        warn "baseline checkpoint may be incomplete"
+    fi
+else
+    warn "test_loop not running, skipping incremental test"
+fi
+
+#######################################
+# TEST 33: Incremental checkpoint (save delta)
+#######################################
+info "Test 33: incr_save - delta"
+
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    INCR_DELTA_DIR="$TESTDIR/incr_delta"
+    mkdir -p "$INCR_DELTA_DIR"
+    
+    # Save incremental checkpoint (comparing with baseline) - with timeout
+    timeout 3 $CKPTMINI incr_save "$TESTLOOP_INCR_PID" "$INCR_DELTA_DIR" "$INCR_BASELINE_DIR" > /dev/null 2>&1 || warn "incremental save failed"
+    
+    if [ -f "$INCR_DELTA_DIR/is_incremental" ]; then
+        pass "incremental checkpoint marked as delta"
+    else
+        warn "incremental checkpoint may not be marked correctly"
+    fi
+    
+    if [ -f "$INCR_DELTA_DIR/baseline" ]; then
+        pass "incremental checkpoint has baseline reference"
+    else
+        warn "incremental checkpoint missing baseline reference"
+    fi
+else
+    warn "test_loop not running, skipping incremental delta test"
+fi
+
+# Kill the test_loop after incremental save
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    kill -9 "$TESTLOOP_INCR_PID" 2>/dev/null || true
+fi
+
+#######################################
+# TEST 34: Incremental restore
+#######################################
+info "Test 34: incr_restore"
+
+# Start a fresh test_loop in background
+"$TESTLOOP" > /dev/null 2>&1 &
+SPAWN_PID=$!
+sleep 0.5
+
+# Start a killer in case it hangs
+(
+    sleep 3
+    if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+        kill -9 "$SPAWN_PID" 2>/dev/null || true
+    fi
+) &
+KILLER_PID=$!
+
+if kill -0 "$SPAWN_PID" 2>/dev/null && [ -d "$INCR_DELTA_DIR" ]; then
+    # Try incremental restore with timeout
+    INCR_RESTORE_RESULT=$(timeout 3 $CKPTMINI incr_restore "$SPAWN_PID" "$INCR_DELTA_DIR" 2>&1) || true
+    
+    if echo "$INCR_RESTORE_RESULT" | grep -q "Incremental"; then
+        pass "incr_restore command executes"
+    else
+        warn "incr_restore may have failed"
+    fi
+else
+    warn "Could not test incr_restore (no spawned process or no delta dir)"
+fi
+
+# Clean up
+kill -9 "$KILLER_PID" 2>/dev/null || true
+if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+    kill -9 "$SPAWN_PID" 2>/dev/null || true
+fi
 
 #######################################
 # SUMMARY

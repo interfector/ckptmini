@@ -631,6 +631,83 @@ int find_chunk_for_addr(const char *memdir, uint64_t addr, size_t len, char *pat
  */
 bool search_bytes_in_map_cb(pid_t pid, uint64_t start, uint64_t end, const char *perms, const char *path, void *ud);
 
+typedef struct {
+    pid_t tid;             /**< Thread ID */
+    uint64_t stack_start;  /**< Stack start address */
+    uint64_t stack_end;   /**< Stack end address */
+} thread_info_t;
+
+/**
+ * @brief Get list of all threads in a process
+ * @param pid Process ID
+ * @param count Output: number of threads found
+ * @return Dynamically allocated array of thread_info_t, must be freed
+ */
+thread_info_t* get_thread_list(pid_t pid, size_t *count);
+
+/**
+ * @brief Save thread registers to checkpoint
+ * @param tid Thread ID
+ * @param dir Checkpoint directory
+ */
+void save_thread_regs(pid_t tid, const char *dir);
+
+/**
+ * @brief Save all threads (including main) to checkpoint
+ * @param pid Main process ID
+ * @param dir Checkpoint directory
+ */
+void save_all_threads(pid_t pid, const char *dir);
+
+/**
+ * @brief Load thread list from checkpoint
+ * @param dir Checkpoint directory
+ * @param count Output: number of threads
+ * @return Dynamically allocated array of thread IDs
+ */
+pid_t* load_thread_list(const char *dir, size_t *count);
+
+/**
+ * @brief Load thread registers from checkpoint
+ * @param tid Thread ID (used for directory naming)
+ * @param dir Checkpoint directory
+ * @return regs_t structure with saved registers
+ */
+regs_t load_thread_regs(pid_t tid, const char *dir);
+
+/**
+ * @brief Restore all threads from checkpoint (except main)
+ * @param pid Main process ID (already restored)
+ * @param dir Checkpoint directory
+ */
+void restore_threads(pid_t pid, const char *dir);
+
+/**
+ * @brief Full checkpoint with thread support
+ * @param pid Process ID
+ * @param outdir Output directory
+ */
+void checkpoint_with_threads(pid_t pid, const char *outdir);
+
+/**
+ * @brief Restore with thread support
+ * @param pid Target process
+ * @param dir Checkpoint directory
+ */
+void restore_with_threads(pid_t pid, const char *dir);
+
+/**
+ * @brief Show threads of a live process
+ * @param pid Process ID
+ */
+void show_threads(pid_t pid);
+
+/**
+ * @brief Show saved threads from checkpoint
+ * @param dir Checkpoint directory
+ */
+void show_threads_dump(const char *dir);
+
 /**
  * @brief Check if region should be included in checkpoint
  * @param map Memory map structure

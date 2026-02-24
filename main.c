@@ -150,6 +150,44 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (!strcmp(argv[1], "save_t")) {
+        if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        const char *outdir = argv[3];
+        checkpoint_with_threads(pid, outdir);
+        return EXIT_SUCCESS;
+    }
+
+    if (!strcmp(argv[1], "restore_t")) {
+        if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        const char *indir = argv[3];
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
+        printf("  %s Restoring dump %s into PID %d (with threads)\n", S_INFO, indir, pid);
+        if (g_is_tty) printf(A_RESET);
+        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH restore_t");
+        waitpid(pid, NULL, __WALL);
+        restore_with_threads(pid, indir);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (g_is_tty) printf(A_BOLD A_GREEN);
+        printf("  %s Restore complete (with threads). Use 'resume' to continue.\n", S_OK);
+        if (g_is_tty) printf(A_RESET);
+        return EXIT_SUCCESS;
+    }
+
+    if (!strcmp(argv[1], "threads")) {
+        if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
+        show_threads((pid_t)atoi(argv[2]));
+        return EXIT_SUCCESS;
+    }
+
+    if (!strcmp(argv[1], "threads_dump")) {
+        if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
+        show_threads_dump(argv[2]);
+        return EXIT_SUCCESS;
+    }
+
     if (!strcmp(argv[1], "restore")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);
@@ -159,7 +197,7 @@ int main(int argc, char **argv) {
         printf("  %s Restoring dump %s into PID %d\n", S_INFO, indir, pid);
         if (g_is_tty) printf(A_RESET);
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH restore");
-        waitpid(pid, NULL, 0);
+        waitpid(pid, NULL, __WALL);
         restore_into(pid, indir);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         if (g_is_tty) printf(A_BOLD A_GREEN);

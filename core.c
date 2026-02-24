@@ -1095,3 +1095,337 @@ void incremental_restore(pid_t pid, const char *indir) {
     if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
     fprintf(stderr, "[incr-restore] done\n");
 }
+
+thread_info_t* get_thread_list(pid_t pid, size_t *count) {
+    char taskdir[256];
+    snprintf(taskdir, sizeof(taskdir), "/proc/%d/task", pid);
+    DIR *dir = opendir(taskdir);
+    if (!dir) {
+        perror("opendir /proc/pid/task");
+        *count = 0;
+        return NULL;
+    }
+
+    size_t cap = 16;
+    size_t n = 0;
+    thread_info_t *threads = calloc(cap, sizeof(thread_info_t));
+    if (!threads) {
+        closedir(dir);
+        *count = 0;
+        return NULL;
+    }
+
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        pid_t tid = (pid_t)atoi(de->d_name);
+        if (tid == 0) continue;
+
+        if (n >= cap) {
+            cap *= 2;
+            threads = realloc(threads, cap * sizeof(thread_info_t));
+            if (!threads) {
+                closedir(dir);
+                *count = 0;
+                return NULL;
+            }
+        }
+
+        threads[n].tid = tid;
+        threads[n].stack_start = 0;
+        threads[n].stack_end = 0;
+
+        char maps_path[512];
+        snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", tid);
+        FILE *maps = fopen(maps_path, "r");
+        if (maps) {
+            char line[1024];
+            while (fgets(line, sizeof(line), maps)) {
+                unsigned long start, end;
+                char perms[5];
+                if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) == 3) {
+                    if (strstr(line, "[stack]") || (perms[0] == 'r' && perms[1] == 'w' && perms[2] == '-' && start < 0x7fff00000000ULL)) {
+                        threads[n].stack_start = start;
+                        threads[n].stack_end = end;
+                        break;
+                    }
+                }
+            }
+            fclose(maps);
+        }
+
+        n++;
+    }
+    closedir(dir);
+    *count = n;
+    return threads;
+}
+
+void save_thread_regs(pid_t tid, const char *dir) {
+    char thrdir[512];
+    snprintf(thrdir, sizeof(thrdir), "%s/threads", dir);
+    mkpath_or_die(thrdir);
+
+    char tidpath[512];
+    snprintf(tidpath, sizeof(tidpath), "%s/%d", thrdir, (int)tid);
+    mkpath_or_die(tidpath);
+
+    char regfile[512];
+    snprintf(regfile, sizeof(regfile), "%s/regs.bin", tidpath);
+
+    if (ptrace(PTRACE_ATTACH, tid, NULL, NULL) == -1) {
+        fprintf(stderr, "[save_thread] PTRACE_ATTACH failed for tid %d: %s\n", (int)tid, strerror(errno));
+        return;
+    }
+    waitpid(tid, NULL, 0);
+
+    int fd = open(regfile, O_CREAT|O_TRUNC|O_WRONLY, 0644);
+    if (fd >= 0) {
+        regs_t r;
+        if (ptrace(PTRACE_GETREGS, tid, 0, &r) == -1) {
+            fprintf(stderr, "[save_thread] PTRACE_GETREGS failed for tid %d: %s\n", (int)tid, strerror(errno));
+        } else {
+            write_all_or_die(fd, &r, sizeof(r));
+        }
+        close(fd);
+    }
+
+    ptrace(PTRACE_DETACH, tid, NULL, NULL);
+}
+
+static void save_thread_stack(pid_t tid, const char *dir, uint64_t stack_start, uint64_t stack_end) {
+    if (stack_start == 0 || stack_end == 0) return;
+
+    char thrdir[512];
+    snprintf(thrdir, sizeof(thrdir), "%s/threads/%d", dir, (int)tid);
+
+    size_t len = stack_end - stack_start;
+    void *buf = malloc(len);
+    if (!buf) return;
+
+    int memfd = open("/proc/self/mem", O_RDONLY);
+    if (memfd < 0) {
+        free(buf);
+        return;
+    }
+
+    ssize_t got = pread(memfd, buf, len, (off_t)stack_start);
+    close(memfd);
+
+    if (got > 0) {
+        char stackfile[512];
+        snprintf(stackfile, sizeof(stackfile), "%s/stack.bin", thrdir);
+        int fd = open(stackfile, O_CREAT|O_TRUNC|O_WRONLY, 0644);
+        if (fd >= 0) {
+            write_all_or_die(fd, buf, (size_t)got);
+            close(fd);
+            fprintf(stderr, "[save_thread] saved stack %016llx-%016llx for tid %d\n",
+                    (unsigned long long)stack_start, (unsigned long long)stack_end, (int)tid);
+        }
+    }
+    free(buf);
+}
+
+void save_all_threads(pid_t pid, const char *dir) {
+    size_t count = 0;
+    thread_info_t *threads = get_thread_list(pid, &count);
+    if (!threads || count == 0) {
+        fprintf(stderr, "[save_threads] no threads found for pid %d\n", (int)pid);
+        if (threads) free(threads);
+        return;
+    }
+
+    char threads_file[512];
+    snprintf(threads_file, sizeof(threads_file), "%s/threads.txt", dir);
+    FILE *f = fopen(threads_file, "w");
+    if (!f) {
+        perror("fopen threads.txt");
+        free(threads);
+        return;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        fprintf(f, "%d %llx %llx\n", (int)threads[i].tid,
+                (unsigned long long)threads[i].stack_start,
+                (unsigned long long)threads[i].stack_end);
+    }
+    fclose(f);
+
+    fprintf(stderr, "[save_threads] found %zu threads for pid %d\n", count, (int)pid);
+
+    for (size_t i = 0; i < count; i++) {
+        pid_t tid = threads[i].tid;
+
+        if (tid == pid) {
+            fprintf(stderr, "[save_threads] skipping main thread %d (already saved)\n", (int)tid);
+            continue;
+        }
+
+        fprintf(stderr, "[save_threads] saving thread %d\n", (int)tid);
+
+        save_thread_regs(tid, dir);
+        save_thread_stack(tid, dir, threads[i].stack_start, threads[i].stack_end);
+    }
+
+    free(threads);
+}
+
+pid_t* load_thread_list(const char *dir, size_t *count) {
+    char threads_file[512];
+    snprintf(threads_file, sizeof(threads_file), "%s/threads.txt", dir);
+
+    FILE *f = fopen(threads_file, "r");
+    if (!f) {
+        *count = 0;
+        return NULL;
+    }
+
+    size_t cap = 16;
+    size_t n = 0;
+    pid_t *threads = calloc(cap, sizeof(pid_t));
+    if (!threads) {
+        fclose(f);
+        *count = 0;
+        return NULL;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        pid_t tid;
+        unsigned long long stack_start, stack_end;
+        if (sscanf(line, "%d %llx %llx", &tid, &stack_start, &stack_end) >= 1) {
+            if (n >= cap) {
+                cap *= 2;
+                threads = realloc(threads, cap * sizeof(pid_t));
+                if (!threads) {
+                    fclose(f);
+                    *count = 0;
+                    return NULL;
+                }
+            }
+            threads[n++] = tid;
+        }
+    }
+    fclose(f);
+    *count = n;
+    return threads;
+}
+
+regs_t load_thread_regs(pid_t tid, const char *dir) {
+    regs_t r = {0};
+
+    char regfile[512];
+    snprintf(regfile, sizeof(regfile), "%s/threads/%d/regs.bin", dir, (int)tid);
+
+    int fd = open(regfile, O_RDONLY);
+    if (fd >= 0) {
+        read_all_or_die(fd, &r, sizeof(r));
+        close(fd);
+    } else {
+        fprintf(stderr, "[load_thread_regs] could not open %s: %s\n", regfile, strerror(errno));
+    }
+
+    return r;
+}
+
+void restore_threads(pid_t pid, const char *dir) {
+    size_t count = 0;
+    pid_t *threads = load_thread_list(dir, &count);
+    if (!threads || count <= 1) {
+        fprintf(stderr, "[restore_threads] no additional threads to restore (count=%zu)\n", count);
+        if (threads) free(threads);
+        return;
+    }
+
+    fprintf(stderr, "[restore_threads] restoring %zu threads\n", count);
+
+    for (size_t i = 1; i < count; i++) {
+        pid_t tid = threads[i];
+        fprintf(stderr, "[restore_threads] restoring thread %d\n", (int)tid);
+
+        regs_t r = load_thread_regs(tid, dir);
+
+        pid_t clone_pid = fork();
+        if (clone_pid < 0) {
+            perror("fork for thread");
+            continue;
+        }
+
+        if (clone_pid == 0) {
+            if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+                perror("PTRACE_ATTACH in child");
+                _exit(1);
+            }
+            waitpid(pid, NULL, 0);
+
+            if (ptrace(PTRACE_SETREGS, pid, 0, &r) == -1) {
+                perror("PTRACE_SETREGS");
+            }
+
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            _exit(0);
+        }
+
+        waitpid(clone_pid, NULL, 0);
+    }
+
+    free(threads);
+}
+
+void checkpoint_with_threads(pid_t pid, const char *outdir) {
+    mkpath_or_die(outdir);
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
+    waitpid(pid, NULL, 0);
+
+    save_meta(pid, outdir);
+    save_regs(pid, outdir);
+    save_maps_and_memory(pid, outdir);
+    save_all_threads(pid, outdir);
+
+    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    fprintf(stderr, "[ckpt] saved to %s (with threads)\n", outdir);
+}
+
+void restore_with_threads(pid_t pid, const char *dir) {
+    bool full = restore_regions(pid, dir);
+    if (full) {
+        load_regs(pid, dir);
+    }
+    restore_threads(pid, dir);
+    fprintf(stderr, "[restore] restored into PID %d with threads\n", pid);
+}
+
+void show_threads(pid_t pid) {
+    size_t count = 0;
+    thread_info_t *threads = get_thread_list(pid, &count);
+    if (!threads) {
+        fprintf(stderr, "Could not get thread list for pid %d\n", (int)pid);
+        return;
+    }
+
+    printf("Threads for PID %d (%zu threads):\n", (int)pid, count);
+    printf("%-10s %-18s %-18s\n", "TID", "Stack Start", "Stack End");
+    for (size_t i = 0; i < count; i++) {
+        printf("%-10d 0x%016llx 0x%016llx\n",
+               (int)threads[i].tid,
+               (unsigned long long)threads[i].stack_start,
+               (unsigned long long)threads[i].stack_end);
+    }
+    free(threads);
+}
+
+void show_threads_dump(const char *dir) {
+    size_t count = 0;
+    pid_t *threads = load_thread_list(dir, &count);
+    if (!threads) {
+        fprintf(stderr, "Could not load thread list from %s\n", dir);
+        return;
+    }
+
+    printf("Threads in checkpoint (%zu threads):\n", count);
+    printf("%-10s\n", "TID");
+    for (size_t i = 0; i < count; i++) {
+        printf("%-10d\n", (int)threads[i]);
+    }
+    free(threads);
+}
