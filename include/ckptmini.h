@@ -280,6 +280,27 @@ void save_meta(pid_t pid, const char *dir);
 void save_maps_and_memory(pid_t pid, const char *dir);
 
 /**
+ * @brief Dump memory region to binary file
+ * @param dir Output directory
+ * @param rg Region descriptor
+ * @param data Memory data
+ * @param len Length
+ * @return Number of bytes written
+ */
+size_t dump_region_bin(const char *dir, const region_t *rg, const void *data, size_t len);
+
+/**
+ * @brief Read bytes from process memory
+ * @param pid Process ID
+ * @param memfd Open /proc/pid/mem file descriptor
+ * @param start Start address
+ * @param buf Output buffer
+ * @param len Bytes to read
+ * @return Bytes actually read
+ */
+size_t dump_bytes_from_mem(pid_t pid, int memfd, uint64_t start, void *buf, size_t len);
+
+/**
  * @brief Full checkpoint: save process state to disk
  * @param pid Process ID to checkpoint
  * @param outdir Output directory for checkpoint
@@ -688,9 +709,47 @@ void show_threads(pid_t pid);
 void show_threads_dump(const char *dir);
 
 /**
+ * @brief Check if region should be included in checkpoint
+ * @param map Memory map structure
+ * @return true if region should be dumped
+ */
+bool region_is_minimal_target_pm(const procmaps_struct *map);
+
+/**
  * @brief Print usage information
  * @param prog Program name
  */
 void usage(const char *prog);
+
+/**
+ * @brief Check if checkpoint is incremental
+ * @param dir Checkpoint directory
+ * @return true if incremental checkpoint
+ */
+bool is_incremental_checkpoint(const char *dir);
+
+/**
+ * @brief Get baseline checkpoint directory for incremental checkpoint
+ * @param dir Incremental checkpoint directory
+ * @param out Baseline directory path buffer
+ * @param out_sz Buffer size
+ * @return 0 on success, -1 if not found
+ */
+int get_baseline_dir(const char *dir, char *out, size_t out_sz);
+
+/**
+ * @brief Save incremental checkpoint (only changed regions)
+ * @param pid Process ID
+ * @param outdir Output directory for incremental checkpoint
+ * @param baseline_dir Previous checkpoint directory (can be NULL for full)
+ */
+void incremental_checkpoint(pid_t pid, const char *outdir, const char *baseline_dir);
+
+/**
+ * @brief Restore from incremental checkpoint
+ * @param pid Target process
+ * @param indir Checkpoint directory (incremental or baseline)
+ */
+void incremental_restore(pid_t pid, const char *indir);
 
 #endif

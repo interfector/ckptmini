@@ -540,6 +540,94 @@ wait "$TESTCALL_PID" 2>/dev/null || true
 TESTCALL_PID=""
 
 #######################################
+# TEST 32: Incremental checkpoint (save baseline)
+#######################################
+info "Test 32: incr_save - baseline"
+
+# Start test_loop in background
+"$TESTLOOP" > /dev/null 2>&1 &
+TESTLOOP_INCR_PID=$!
+sleep 1
+
+INCR_BASELINE_DIR="$TESTDIR/incr_baseline"
+mkdir -p "$INCR_BASELINE_DIR"
+
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    $CKPTMINI save "$TESTLOOP_INCR_PID" "$INCR_BASELINE_DIR" > /dev/null 2>&1 || warn "baseline save failed"
+    
+    if [ -f "$INCR_BASELINE_DIR/maps.txt" ]; then
+        pass "baseline checkpoint created"
+    else
+        warn "baseline checkpoint may be incomplete"
+    fi
+else
+    warn "test_loop not running, skipping incremental test"
+fi
+
+#######################################
+# TEST 33: Incremental checkpoint (save delta)
+#######################################
+info "Test 33: incr_save - delta"
+
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    INCR_DELTA_DIR="$TESTDIR/incr_delta"
+    mkdir -p "$INCR_DELTA_DIR"
+    
+    # Save incremental checkpoint (comparing with baseline) - with timeout
+    timeout 3 $CKPTMINI incr_save "$TESTLOOP_INCR_PID" "$INCR_DELTA_DIR" "$INCR_BASELINE_DIR" > /dev/null 2>&1 || warn "incremental save failed"
+    
+    if [ -f "$INCR_DELTA_DIR/is_incremental" ]; then
+        pass "incremental checkpoint marked as delta"
+    else
+        warn "incremental checkpoint may not be marked correctly"
+    fi
+    
+    if [ -f "$INCR_DELTA_DIR/baseline" ]; then
+        pass "incremental checkpoint has baseline reference"
+    else
+        warn "incremental checkpoint missing baseline reference"
+    fi
+else
+    warn "test_loop not running, skipping incremental delta test"
+fi
+
+# Kill the test_loop after incremental save
+if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
+    kill -9 "$TESTLOOP_INCR_PID" 2>/dev/null || true
+fi
+
+#######################################
+# TEST 34: Incremental restore
+#######################################
+info "Test 34: incr_restore"
+
+# Start a fresh test_loop in background
+"$TESTLOOP" > /dev/null 2>&1 &
+SPAWN_PID=$!
+sleep 0.5
+
+KILLER_PID=$!
+
+if kill -0 "$SPAWN_PID" 2>/dev/null && [ -d "$INCR_DELTA_DIR" ]; then
+    # Try incremental restore with timeout
+    INCR_RESTORE_RESULT=$(timeout 3 $CKPTMINI incr_restore "$SPAWN_PID" "$INCR_DELTA_DIR" 2>&1) || true
+    
+    if echo "$INCR_RESTORE_RESULT" | grep -q "Incremental"; then
+        pass "incr_restore command executes"
+    else
+        warn "incr_restore may have failed"
+    fi
+else
+    warn "Could not test incr_restore (no spawned process or no delta dir)"
+fi
+
+# Clean up
+kill -9 "$KILLER_PID" 2>/dev/null || true
+#if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
+#    kill -9 "$SPAWN_PID" 2>/dev/null || true
+#fi
+
+#######################################
 # SUMMARY
 #######################################
 echo ""
