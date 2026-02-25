@@ -159,8 +159,8 @@ Register names: rip, rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15.
 
 Example - spawn a shell:
 ```bash
-./ckptmini inject_shellcode 12345 4831c0b89a01000000000000
-# execve("/bin/sh", 0, 0)
+./ckptmini inject_shellcode 12345 b801000000bf01000000488d3508000000ba050000000f05cc48656c6c6f
+# write(1, "Hello", 5);
 ```
 
 **Limitations:**
