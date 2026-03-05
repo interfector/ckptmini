@@ -846,17 +846,14 @@ void cmd_load_so(pid_t pid, const char *so_path) {
         return;
     }
 
-    void *local_dlsym = dlsym(RTLD_DEFAULT, "dlsym");
     void *local_dlopen = dlsym(RTLD_DEFAULT, "dlopen");
-    if (!local_dlsym || !local_dlopen) {
+    if (!local_dlopen) {
         fprintf(stderr, "load_so: couldn't find local symbols\n");
         if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return;
     }
 
-    uint64_t dlsym_offset = (uint64_t)local_dlsym - local_libc;
     uint64_t dlopen_offset = (uint64_t)local_dlopen - local_libc;
-    uint64_t remote_dlsym = remote_libc + dlsym_offset;
     uint64_t remote_dlopen = remote_libc + dlopen_offset;
 
     uintptr_t path_addr = (uintptr_t)remote_syscall_x64(pid, __NR_mmap, 0, 4096,
@@ -869,40 +866,19 @@ void cmd_load_so(pid_t pid, const char *so_path) {
 
     if (!write_bytes_to_pid(pid, path_addr, so_path, path_len)) {
         fprintf(stderr, "load_so: write path failed\n");
-        remote_syscall_x64(pid, __NR_munmap, path_addr, 4096, 0, 0, 0, 0);
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return;
-    }
-
-    uintptr_t dlopen_name_addr = path_addr + 2048;
-    if (!write_bytes_to_pid(pid, dlopen_name_addr, "dlopen", 7)) {
-        fprintf(stderr, "load_so: write dlopen name failed\n");
-        remote_syscall_x64(pid, __NR_munmap, path_addr, 4096, 0, 0, 0, 0);
+        remote_syscall_x64(pid, __NR_munmap, path_addr, 2048, 0, 0, 0, 0);
         if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return;
     }
 
     char arg0[32], arg1[32];
-    snprintf(arg0, sizeof(arg0), "0x0");
-    snprintf(arg1, sizeof(arg1), "0x%lx", dlopen_name_addr);
-    char *dlsym_argv[] = { arg0, arg1 };
-    uint64_t resolved_dlopen = 0;
-    
-    cmd_call_ret(pid, remote_dlsym, 2, dlsym_argv, false, &resolved_dlopen);
-
-    if (resolved_dlopen == 0 || resolved_dlopen == (uint64_t)-1) {
-        fprintf(stderr, "load_so: dlsym failed to find dlopen\n");
-        remote_syscall_x64(pid, __NR_munmap, path_addr, 4096, 0, 0, 0, 0);
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return;
-    }
 
     snprintf(arg0, sizeof(arg0), "0x%lx", path_addr);
     snprintf(arg1, sizeof(arg1), "0x2");
     char *dlopen_argv[] = { arg0, arg1 };
     uint64_t dlopen_result = 0;
 
-    cmd_call_ret(pid, resolved_dlopen, 2, dlopen_argv, false, &dlopen_result);
+    cmd_call_ret(pid, remote_dlopen, 2, dlopen_argv, false, &dlopen_result);
 
     if (dlopen_result == 0) {
         fprintf(stderr, "load_so: dlopen failed\n");
