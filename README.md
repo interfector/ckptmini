@@ -156,6 +156,8 @@ Register names: rip, rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15.
 | Command | Description |
 |---------|-------------|
 | `inject_shellcode <pid> <hex>` | Write and execute machine code in process |
+| `upload <pid> <hex> <len> [perms]` | Upload bytes to remote process (for strings, shellcode, etc.) |
+| `upload <pid> --str <string> [perms]` | Upload string to remote process |
 
 Example - spawn a shell:
 ```bash
@@ -174,8 +176,23 @@ Example - spawn a shell:
 |---------|-------------|
 | `call <pid> <addr> [args]` | Call function at address with arguments |
 | `load_so <pid> <path>` | Load shared library into process |
+| `resolve <pid> <symbol>` | Resolve symbol address using dlsym |
+| `upload <pid> <hex> <len> [perms]` | Upload bytes to remote process memory |
+| `upload <pid> --str <string> [perms]` | Upload string to remote process memory |
 
-`load_so` uses `dlopen` internally to inject the library.
+`load_so` and `resolve` use `dlopen`/`dlsym` internally to inject libraries or resolve symbols.
+
+**Usage examples:**
+```bash
+# Resolve a symbol address
+./ckptmini resolve 12345 system
+
+# Upload a string to remote process
+./ckptmini upload 12345 --str "/bin/sh"
+
+# Upload binary data (5 bytes)
+./ckptmini upload 12345 48656c6c6f 5
+```
 
 **Limitations:**
 - Function addresses must be known (static binaries harder)
@@ -216,6 +233,13 @@ Dynamically load a .so into a running process. This is powerful for:
 - Runtime instrumentation
 - Debugging without restart
 - Extending functionality dynamically
+
+### Resolve Symbols
+
+Resolve function addresses in a remote process using dlsym. Useful when you need to:
+- Find addresses of functions without hardcoding them
+- Call functions in dynamically loaded libraries
+- Build payloads that work across different ASLR layouts
 
 ### Memory Watching
 

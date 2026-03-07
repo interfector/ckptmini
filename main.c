@@ -118,6 +118,47 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (!strcmp(argv[1], "upload")) {
+        if (argc < 5) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        int prot = 0;
+        size_t hex_offset = 0;
+        
+        if (!strcmp(argv[3], "--str")) {
+            if (argc < 5) { usage(argv[0]); return EXIT_FAILURE; }
+            const char *str = argv[4];
+            size_t str_len = strlen(str);
+            if (argc >= 6) {
+                prot = parse_perms(argv[5]);
+                if (prot < 0) { fprintf(stderr, "upload: invalid perms '%s'\n", argv[5]); return EXIT_FAILURE; }
+            }
+            uint64_t addr = cmd_upload(pid, str, str_len, prot);
+            return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        } else {
+            const char *hex = argv[3];
+            size_t num_bytes = (size_t)strtoul(argv[4], NULL, 10);
+            if (argc >= 6) {
+                prot = parse_perms(argv[5]);
+                if (prot < 0) { fprintf(stderr, "upload: invalid perms '%s'\n", argv[5]); return EXIT_FAILURE; }
+            }
+            size_t blen = 0;
+            unsigned char *bytes = parse_hex(hex, &blen);
+            if (!bytes) { fprintf(stderr, "upload: invalid hex\n"); return EXIT_FAILURE; }
+            if (blen != num_bytes) { fprintf(stderr, "upload: hex length (%zu) != specified bytes (%zu)\n", blen, num_bytes); free(bytes); return EXIT_FAILURE; }
+            uint64_t addr = cmd_upload(pid, bytes, num_bytes, prot);
+            free(bytes);
+            return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+    }
+
+    if (!strcmp(argv[1], "resolve")) {
+        if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        const char *symbol = argv[3];
+        uint64_t addr = cmd_resolve(pid, symbol);
+        return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
     if (!strcmp(argv[1], "save")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);
