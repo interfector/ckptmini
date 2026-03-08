@@ -395,6 +395,7 @@ void usage(const char *prog) {
     fprintf(stderr, A_WHITE A_BOLD "  %s\n", "Core Commands:" A_RESET);
     fprintf(stderr, "  %-24s %s\n", "save <pid> <outdir>", "Save process memory & regs to directory");
     fprintf(stderr, "  %-24s %s\n", "restore <pid> <dir>", "Restore saved state to process");
+    fprintf(stderr, "  %-24s %s\n", "parasite <pid> <dir>", "Restore using parasite (ASLR-proof)");
     fprintf(stderr, "  %-24s %s\n", "incr_save <pid> <out> <base>", "Incremental save (only changes)");
     fprintf(stderr, "  %-24s %s\n", "incr_restore <pid> <dir>", "Restore from inc. checkpoint");
     fprintf(stderr, "  %-24s %s\n", "dump <pid|dir>", "Show memory regions with colors");

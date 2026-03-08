@@ -191,6 +191,21 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (!strcmp(argv[1], "parasite")) {
+        if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        const char *indir = argv[3];
+        
+        if (g_is_tty) printf(A_BOLD A_CYAN);
+        printf("  %s Parasite restore checkpoint %s into PID %d\n", S_INFO, indir, pid);
+        if (g_is_tty) printf(A_RESET);
+        inject_and_restore(pid, indir);
+        if (g_is_tty) printf(A_BOLD A_GREEN);
+        printf("  %s Parasite restore complete.\n", S_OK);
+        if (g_is_tty) printf(A_RESET);
+        return EXIT_SUCCESS;
+    }
+
     if (!strcmp(argv[1], "save_t")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);

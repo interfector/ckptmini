@@ -199,6 +199,46 @@ Example - spawn a shell:
 - Arguments limited to basic types
 - No automatic cleanup of function results
 
+## Advanced Features
+
+### Parasite-Based Restore
+
+| Command | Description |
+|---------|-------------|
+| `parasite <pid> <dir>` | Restore checkpoint using position-independent parasite code injection |
+
+The `parasite` command implements an ASLR-safe restore mechanism that injects position-independent code into the target process. This allows restoring checkpoints into processes at arbitrary memory addresses without requiring fixed address layouts.
+
+**How it works:**
+1. Allocates memory space in target process for parasite code, stack, and region descriptors
+2. Injects position-independent parasite binary that can run anywhere in memory
+3. Uses int3 breakpoints + SIGTRAP signals for communication
+4. Restores each memory region using `/proc/<pid>/mem` for data transfer
+5. Restores saved CPU registers and jumps to original entry point
+6. Automatically unmaps parasite code before returning control to restored process
+
+**Advantages over `restore` command:**
+- Works with ASLR-enabled systems (processes at different base addresses)
+- No hardcoded address assumptions
+- Cleaner restoration (parasite self-unmaps)
+
+**Usage example:**
+```bash
+# Save a checkpoint
+./ckptmini save 12345 /tmp/checkpoint
+
+# Stop the process and restore using parasite
+kill -STOP 12345
+./ckptmini parasite 12345 /tmp/checkpoint
+
+# Process continues from checkpoint state
+```
+
+**Limitations:**
+- Requires ptrace attach permissions
+- May fail with certain memory protection schemes
+- Not suitable for processes with custom signal handlers
+
 ### Modifying Checkpoint Dumps
 
 | Command | Description |
