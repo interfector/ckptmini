@@ -12,6 +12,9 @@ TEST_OBJS = $(TEST_SOURCES:.c=.o)
 TESTLIB = testlib.so
 TESTLIB_SRC = tests/testlib.c
 
+HIJACKLIB = hijacklib.so
+HIJACKLIB_SRC = tests/hijacklib.c
+
 .PHONY: all clean test
 
 all: $(TARGET)
@@ -22,13 +25,16 @@ $(TARGET): $(OBJECTS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(TEST_TARGETS) $(TESTLIB)
+test: $(TEST_TARGETS) $(TESTLIB) $(HIJACKLIB)
 
-tests: all test_loop test_call test_thread $(TESTLIB)
+tests: all test_loop test_call test_thread $(TESTLIB) $(HIJACKLIB)
 	./tests/test_ckptmini.sh
 
 $(TESTLIB): $(TESTLIB_SRC)
 	gcc -shared -fPIC -fno-stack-protector -nostdlib -o tests/testlib.so $<
+
+$(HIJACKLIB): $(HIJACKLIB_SRC)
+	gcc -shared -fPIC -o tests/hijacklib.so $< -Wl,-u,printf
 
 test_loop: tests/test_loop.o
 	$(CC) $< -o tests/test_loop
@@ -43,4 +49,4 @@ tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJECTS) $(TEST_TARGETS) $(TEST_OBJS) tests/testlib.so $(TARGET)
+	rm -f $(OBJECTS) $(TEST_TARGETS) $(TEST_OBJS) tests/testlib.so tests/hijacklib.so $(TARGET)
