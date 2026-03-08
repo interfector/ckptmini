@@ -420,9 +420,78 @@ else
 fi
 
 #######################################
-# TEST 27: Thread enumeration (threads command)
+# TEST 27: Resolve symbol (needs root)
+# Resolve a symbol address using dlsym
 #######################################
-info "Test 27: threads command"
+info "Test 27: resolve command"
+
+if kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # Resolve a common libc function
+    RESULT=$($CKPTMINI resolve "$TESTCALL_PID" printf 2>&1)
+    echo "$RESULT"
+    
+    if echo "$RESULT" | grep -q "Resolved 'printf'"; then
+        pass "resolve - resolved printf symbol"
+    else
+        warn "resolve - may have failed"
+    fi
+    
+    # Try another symbol
+    RESULT2=$($CKPTMINI resolve "$TESTCALL_PID" malloc 2>&1)
+    echo "$RESULT2"
+    
+    if echo "$RESULT2" | grep -q "Resolved 'malloc'"; then
+        pass "resolve - resolved malloc symbol"
+    else
+        warn "resolve - may have failed for malloc"
+    fi
+else
+    warn "test_call not running, skipping resolve test"
+fi
+
+#######################################
+# TEST 28: Upload string to remote process (needs root)
+#######################################
+info "Test 28: upload --str command"
+
+if kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # Upload a test string
+    UPLOAD_STR="test_string_123"
+    RESULT=$($CKPTMINI upload "$TESTCALL_PID" --str "$UPLOAD_STR" 2>&1)
+    echo "$RESULT"
+    
+    if echo "$RESULT" | grep -q "Uploaded"; then
+        pass "upload --str - uploaded string to remote process"
+    else
+        warn "upload --str - may have failed"
+    fi
+else
+    warn "test_call not running, skipping upload --str test"
+fi
+
+#######################################
+# TEST 29: Upload bytes to remote process (needs root)
+#######################################
+info "Test 29: upload with hex bytes"
+
+if kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # Upload 5 bytes of hex data: "48656c6c6f" = "Hello"
+    RESULT=$($CKPTMINI upload "$TESTCALL_PID" 48656c6c6f 5 2>&1)
+    echo "$RESULT"
+    
+    if echo "$RESULT" | grep -q "Uploaded"; then
+        pass "upload - uploaded bytes to remote process"
+    else
+        warn "upload - may have failed"
+    fi
+else
+    warn "test_call not running, skipping upload test"
+fi
+
+#######################################
+# TEST 30: Thread enumeration (threads command)
+#######################################
+info "Test 30: threads command"
 
 # Start test_thread in background
 "$TESTTHREAD" > /dev/null 2>&1 &
@@ -452,7 +521,7 @@ fi
 #######################################
 # TEST 28: Thread checkpoint (save_t)
 #######################################
-info "Test 28: save_t command"
+info "Test 31: save_t command"
 
 if kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
     THREAD_SAVE_DIR="$TESTDIR/thread_save"
@@ -478,7 +547,7 @@ fi
 #######################################
 # TEST 29: Thread checkpoint inspection (threads_dump)
 #######################################
-info "Test 29: threads_dump command"
+info "Test 32: threads_dump command"
 
 if [ -d "$THREAD_SAVE_DIR" ]; then
     RESULT=$($CKPTMINI threads_dump "$THREAD_SAVE_DIR" 2>&1)
@@ -496,7 +565,7 @@ fi
 # TEST 30: Thread restore (restore_t)
 # Note: Full restore may fail without root, but we test the command runs
 #######################################
-info "Test 30: restore_t command"
+info "Test 33: restore_t command"
 
 # Start a fresh test_thread in background (not from spawn, just direct run)
 "$TESTTHREAD" > /dev/null 2>&1 &
@@ -542,7 +611,7 @@ TESTCALL_PID=""
 #######################################
 # TEST 32: Incremental checkpoint (save baseline)
 #######################################
-info "Test 32: incr_save - baseline"
+info "Test 34: incr_save - baseline"
 
 # Start test_loop in background
 "$TESTLOOP" > /dev/null 2>&1 &
@@ -567,7 +636,7 @@ fi
 #######################################
 # TEST 33: Incremental checkpoint (save delta)
 #######################################
-info "Test 33: incr_save - delta"
+info "Test 35: incr_save - delta"
 
 if kill -0 "$TESTLOOP_INCR_PID" 2>/dev/null; then
     INCR_DELTA_DIR="$TESTDIR/incr_delta"
@@ -599,7 +668,7 @@ fi
 #######################################
 # TEST 34: Incremental restore
 #######################################
-info "Test 34: incr_restore"
+info "Test 36: incr_restore"
 
 # Start a fresh test_loop in background
 "$TESTLOOP" > /dev/null 2>&1 &
