@@ -550,6 +550,25 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
 void cmd_load_so(pid_t pid, const char *so_path);
 
 /**
+ * @brief Upload data to remote process
+ * Allocates memory in target process and writes data to it
+ * @param pid Process ID
+ * @param data Data to write
+ * @param len Number of bytes
+ * @param prot Protection flags (0 = default PROT_READ|PROT_WRITE)
+ * @return Remote address where data was written, 0 on failure
+ */
+uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot);
+
+/**
+ * @brief Resolve symbol address in remote process using dlsym
+ * @param pid Process ID
+ * @param symbol_name Symbol name to resolve
+ * @return Resolved address, 0 on failure
+ */
+uint64_t cmd_resolve(pid_t pid, const char *symbol_name);
+
+/**
  * @brief Spawn process in paused state
  * @param argv Program and arguments
  */

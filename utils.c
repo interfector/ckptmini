@@ -451,6 +451,9 @@ void usage(const char *prog) {
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Advanced:");
     fprintf(stderr, "  %-24s %s\n", "call <pid> <addr> [args]", "Call function in target");
     fprintf(stderr, "  %-24s %s\n", "load_so <pid> <path>", "Load shared library in process");
+    fprintf(stderr, "  %-24s %s\n", "resolve <pid> <symbol>", "Resolve symbol address via dlsym");
+    fprintf(stderr, "  %-24s %s\n", "upload <pid> <hex> <len>", "Upload bytes to remote memory");
+    fprintf(stderr, "  %-24s %s\n", "upload <pid> --str <str>", "Upload string to remote memory");
     fprintf(stderr, "  %-24s %s\n", "relocate <pid> <dir>", "Restore with address relocation");
     fprintf(stderr, "  %-24s %s\n", "replay <prog> <dir>", "Spawn and restore (bypass ASLR)");
     fprintf(stderr, "  %-24s %s\n", "setreg <pid> <name>", "Set register value");

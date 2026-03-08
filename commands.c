@@ -631,8 +631,148 @@ void cmd_backtrace(pid_t pid, bool pause) {
     ptrace(PTRACE_DETACH, pid, NULL, (void*)(pause ? (long)SIGSTOP : 0));
 }
 
+/**
+ * @brief Upload data to remote process by allocating memory and writing to it
+ * 
+ * Uses mmap to allocate memory in the target process, then writes the provided
+ * data to that memory. Useful for uploading strings, shellcode, or any data
+ * that needs to exist in the remote process's address space.
+ * 
+ * @param pid Target process ID
+ * @param data Data to write
+ * @param len Number of bytes to write
+ * @param prot Protection flags (default: PROT_READ|PROT_WRITE)
+ * @return Remote address where data was written, or 0 on failure
+ */
+uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
+    if (prot == 0) prot = PROT_READ | PROT_WRITE;
+
+    bool was_attached = false;
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM || errno == EBUSY) was_attached = true;
+        else { perror("upload: ATTACH"); return 0; }
+    }
+    if (!was_attached) { int st; waitpid(pid, &st, __WALL); }
+
+    uint64_t remote_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, len,
+        prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if ((long)remote_addr < 0) {
+        fprintf(stderr, "upload: mmap failed (ret=%ld)\n", (long)remote_addr);
+        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 0;
+    }
+
+    if (!write_bytes_to_pid(pid, remote_addr, data, len)) {
+        fprintf(stderr, "upload: write failed at 0x%016llx\n", (unsigned long long)remote_addr);
+        remote_syscall_x64(pid, __NR_munmap, remote_addr, len, 0, 0, 0, 0);
+        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 0;
+    }
+
+    if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Uploaded %zu bytes to 0x%016llx\n" A_RESET,
+            len, (unsigned long long)remote_addr);
+    else printf("Uploaded %zu bytes to 0x%016llx\n", len, (unsigned long long)remote_addr);
+
+    if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    return remote_addr;
+}
+
+/**
+ * @brief Resolve a symbol address in a remote process using dlsym
+ * 
+ * Resolves a symbol by:
+ * 1. Finding libc base in both local and remote processes
+ * 2. Calculating offset to dlsym in libc
+ * 3. Uploading the symbol name string to remote process
+ * 4. Calling dlsym(RTLD_DEFAULT, symbol_name) in remote process
+ * 
+ * @param pid Target process ID
+ * @param symbol_name Symbol name to resolve (e.g., "printf", "system")
+ * @return Resolved symbol address, or 0 on failure
+ */
+uint64_t cmd_resolve(pid_t pid, const char *symbol_name) {
+    char line[1024];
+
+    uint64_t local_libc = 0;
+    FILE *lf = fopen("/proc/self/maps", "r");
+    while (lf && fgets(line, sizeof(line), lf)) {
+        if (strstr(line, "libc.so") && strstr(line, "r-xp")) {
+            if (sscanf(line, "%lx-", &local_libc) == 1) break;
+        }
+    }
+    if (lf) fclose(lf);
+
+    uint64_t remote_libc = 0;
+    char maps_path[256];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *rf = fopen(maps_path, "r");
+    while (rf && fgets(line, sizeof(line), rf)) {
+        if (strstr(line, "libc.so") && strstr(line, "r-xp")) {
+            if (sscanf(line, "%lx-", &remote_libc) == 1) break;
+        }
+    }
+    if (rf) fclose(rf);
+
+    if (local_libc == 0 || remote_libc == 0) {
+        fprintf(stderr, "resolve: couldn't find libc\n");
+        return 0;
+    }
+
+    void *local_dlsym = dlsym(RTLD_DEFAULT, "dlsym");
+    if (!local_dlsym) {
+        fprintf(stderr, "resolve: couldn't find local dlsym\n");
+        return 0;
+    }
+
+    uint64_t dlsym_offset = (uint64_t)local_dlsym - local_libc;
+    uint64_t remote_dlsym = remote_libc + dlsym_offset;
+
+    bool was_attached = false;
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM || errno == EBUSY) was_attached = true;
+        else { perror("resolve: ATTACH"); return 0; }
+    }
+    if (!was_attached) { int st; waitpid(pid, &st, __WALL); }
+
+    size_t name_len = strlen(symbol_name) + 1;
+    uint64_t name_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, name_len,
+        PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if ((long)name_addr < 0) {
+        fprintf(stderr, "resolve: mmap failed\n");
+        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 0;
+    }
+
+    if (!write_bytes_to_pid(pid, name_addr, symbol_name, name_len)) {
+        fprintf(stderr, "resolve: write symbol name failed\n");
+        remote_syscall_x64(pid, __NR_munmap, name_addr, name_len, 0, 0, 0, 0);
+        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 0;
+    }
+
+    char arg0[32], arg1[32];
+    snprintf(arg0, sizeof(arg0), "0x0");       // RTLD_DEFAULT
+    snprintf(arg1, sizeof(arg1), "0x%lx", name_addr);
+    char *dlsym_argv[] = { arg0, arg1 };
+    uint64_t result = 0;
+
+    cmd_call_ret(pid, remote_dlsym, 2, dlsym_argv, false, &result);
+
+    remote_syscall_x64(pid, __NR_munmap, name_addr, name_len, 0, 0, 0, 0);
+
+    if (result == 0) {
+        fprintf(stderr, "resolve: dlsym failed for '%s'\n", symbol_name);
+    } else {
+        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
+                symbol_name, (unsigned long long)result);
+        else printf("Resolved '%s' -> 0x%016llx\n", symbol_name, (unsigned long long)result);
+    }
+
+    if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    return result;
+}
+
 void cmd_signals(pid_t pid) {
-    
     char path[512]; snprintf(path, sizeof(path), "/proc/%d/status", pid);
     FILE *f = fopen(path, "r");
     if (!f) { perror("signals: fopen status"); return; }
@@ -803,8 +943,6 @@ uintptr_t cmd_call(pid_t pid, uint64_t addr, int argc, char **argv, bool detach)
  * extending functionality without restarting the target.
  */
 void cmd_load_so(pid_t pid, const char *so_path) {
-    char line[1024];
-
     char resolved_path[1024];
     if (!realpath(so_path, resolved_path)) {
         fprintf(stderr, "load_so: couldn't resolve path: %s\n", so_path);
@@ -822,6 +960,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
 
     uint64_t local_libc = 0;
     FILE *lf = fopen("/proc/self/maps", "r");
+    char line[1024];
     while (lf && fgets(line, sizeof(line), lf)) {
         if (strstr(line, "libc.so") && strstr(line, "r-xp")) {
             if (sscanf(line, "%lx-", &local_libc) == 1) break;
@@ -856,23 +995,14 @@ void cmd_load_so(pid_t pid, const char *so_path) {
     uint64_t dlopen_offset = (uint64_t)local_dlopen - local_libc;
     uint64_t remote_dlopen = remote_libc + dlopen_offset;
 
-    uintptr_t path_addr = (uintptr_t)remote_syscall_x64(pid, __NR_mmap, 0, 4096,
-        PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-    if ((long)path_addr < 0) {
-        fprintf(stderr, "load_so: mmap failed\n");
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return;
-    }
-
-    if (!write_bytes_to_pid(pid, path_addr, so_path, path_len)) {
-        fprintf(stderr, "load_so: write path failed\n");
-        remote_syscall_x64(pid, __NR_munmap, path_addr, 2048, 0, 0, 0, 0);
+    uint64_t path_addr = cmd_upload(pid, so_path, path_len, PROT_READ);
+    if (path_addr == 0) {
+        fprintf(stderr, "load_so: failed to upload path\n");
         if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return;
     }
 
     char arg0[32], arg1[32];
-
     snprintf(arg0, sizeof(arg0), "0x%lx", path_addr);
     snprintf(arg1, sizeof(arg1), "0x2");
     char *dlopen_argv[] = { arg0, arg1 };
@@ -886,7 +1016,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
         fprintf(stderr, "load_so: loaded library successfully\n");
     }
 
-    remote_syscall_x64(pid, __NR_munmap, path_addr, 4096, 0, 0, 0, 0);
+    remote_syscall_x64(pid, __NR_munmap, path_addr, path_len, 0, 0, 0, 0);
 
     if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
