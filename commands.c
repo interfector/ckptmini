@@ -1004,7 +1004,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
 
     char arg0[32], arg1[32];
     snprintf(arg0, sizeof(arg0), "0x%lx", path_addr);
-    snprintf(arg1, sizeof(arg1), "0x2");
+    snprintf(arg1, sizeof(arg1), "0x102");
     char *dlopen_argv[] = { arg0, arg1 };
     uint64_t dlopen_result = 0;
 
