@@ -59,7 +59,10 @@ long remote_syscall_x64(pid_t pid, long nr,
                        unsigned long a1, unsigned long a2, unsigned long a3,
                        unsigned long a4, unsigned long a5, unsigned long a6) {
     regs_t saved, regs;
-    if (ptrace(PTRACE_GETREGS, pid, 0, &saved) == -1) DIE("PTRACE_GETREGS remote_syscall");
+    if (ptrace(PTRACE_GETREGS, pid, 0, &saved) == -1) {
+        perror("PTRACE_GETREGS remote_syscall");
+        return -1;
+    }
     regs = saved;
 
     /* Save original instruction at RIP so we can restore it later */
@@ -94,8 +97,10 @@ long remote_syscall_x64(pid_t pid, long nr,
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) == -1) DIE("PTRACE_CONT remote_syscall");
     int status;
     if (waitpid(pid, &status, __WALL) == -1) DIE("waitpid remote_syscall");
-    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        fprintf(stderr, "[remote_syscall] unexpected stop: status=0x%x\n", status);
+    
+    int stopsig = WIFSTOPPED(status) ? WSTOPSIG(status) : 0;
+    if (stopsig != SIGTRAP) {
+        fprintf(stderr, "[remote_syscall] unexpected stop: status=0x%x stopsig=%d\n", status, stopsig);
     }
 
     regs_t after;

@@ -771,4 +771,11 @@ void incremental_checkpoint(pid_t pid, const char *outdir, const char *baseline_
  */
 void incremental_restore(pid_t pid, const char *indir);
 
+/**
+ * @brief Inject parasite and restore checkpoint using it
+ * @param pid Target process
+ * @param indir Checkpoint directory
+ */
+void inject_and_restore(pid_t pid, const char *indir);
+
 #endif

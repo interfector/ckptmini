@@ -1,4 +1,5 @@
 #include "ckptmini.h"
+#include "parasite.h"
 
 static void print_perms_colored(const char *perms, bool tty) {
     if (!tty) { printf("%-4s", perms); return; }
@@ -1085,4 +1086,390 @@ bool search_bytes_in_map_cb(pid_t pid, uint64_t start, uint64_t end, const char 
     }
     free(buf);
     return true;
+}
+
+extern uint8_t _binary_parasite_bin_start[];
+extern uint8_t _binary_parasite_bin_end[];
+
+#define STACK_SIZE 65536
+
+/**
+ * @brief Restore checkpoint into a running process using parasite shellcode
+ * 
+ * This is the ASLR-safe restore mechanism that works regardless of the target
+ * process's memory layout. Unlike the basic "restore" command which writes
+ * directly to checkpoint addresses (failing if those addresses are occupied),
+ * this approach:
+ * 
+ * 1. Injects position-independent parasite shellcode into the target process
+ * 2. Uses int3 breakpoints + waitpid for communication (no pipes/FDs needed)
+ * 3. Pre-allocates memory regions at the ORIGINAL checkpoint addresses
+ * 4. Copies checkpoint data from scratch area to these regions
+ * 5. Remaps regions with mprotect, then restores original protections
+ * 6. Restores original registers and continues execution
+ * 
+ * The key advantage: it bypasses ASLR by creating fresh anonymous mappings
+ * at the exact addresses from the checkpoint, then copying data into them.
+ * 
+ * @param pid   Target process PID (must be a running process, not spawned/STOPPED)
+ * @param indir Checkpoint directory path
+ */
+void inject_and_restore(pid_t pid, const char *indir) {
+    fprintf(stderr, "[parasite] Starting parasite restore for PID %d from %s\n", pid, indir);
+
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        perror("PTRACE_ATTACH");
+        return;
+    }
+    int status;
+    waitpid(pid, &status, __WALL);
+    if (!WIFSTOPPED(status)) {
+        fprintf(stderr, "[parasite] Unexpected initial status: 0x%x\n", status);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] Initial signal: %d\n", WSTOPSIG(status));
+
+    uint8_t *parasite_start_ptr = _binary_parasite_bin_start;
+    uint64_t parasite_code_size = _binary_parasite_bin_end - _binary_parasite_bin_start;
+    fprintf(stderr, "[parasite] Parasite code size: %lu bytes\n", parasite_code_size);
+
+    procmaps_iterator *it = parse_maps_dump(indir);
+    if (!it) {
+        fprintf(stderr, "[parasite] Failed to parse checkpoint maps\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    size_t num_regions = 0;
+    size_t regions_cap = 64;
+    RegionDesc *regions = malloc(regions_cap * sizeof(RegionDesc));
+    
+    procmaps_struct *map;
+    while ((map = pmparser_next(it)) != NULL) {
+        uint64_t start = (uint64_t)map->addr_start;
+        uint64_t end = (uint64_t)map->addr_end;
+        uint64_t size = end - start;
+        
+        uint32_t flags = 0;
+        if (strstr(map->pathname, "[vdso]")) flags |= IS_VDSO;
+        else if (strstr(map->pathname, "[vsyscall]")) flags |= IS_VSYSCALL;
+        
+        if (flags & (IS_VDSO | IS_VSYSCALL)) continue;
+        
+        if (num_regions >= regions_cap) {
+            regions_cap *= 2;
+            regions = realloc(regions, regions_cap * sizeof(RegionDesc));
+        }
+        
+        char perms[5] = {};
+        get_perms_string(map, perms);
+        uint32_t prot = 0;
+        if (perms[0] == 'r') prot |= PROT_READ;
+        if (perms[1] == 'w') prot |= PROT_WRITE;
+        if (perms[2] == 'x') prot |= PROT_EXEC;
+        
+        regions[num_regions].start = start;
+        regions[num_regions].size = size;
+        regions[num_regions].prot = prot;
+        regions[num_regions].flags = flags;
+        num_regions++;
+    }
+    pmparser_free(it);
+    fprintf(stderr, "[parasite] Collected %zu regions\n", num_regions);
+
+    char regpath[512];
+    snprintf(regpath, sizeof(regpath), "%s/regs.bin", indir);
+    uint64_t restore_rip = 0, restore_rsp = 0;
+    
+    FILE *rf = fopen(regpath, "rb");
+    if (rf) {
+        regs_t saved_regs;
+        if (fread(&saved_regs, 1, sizeof(saved_regs), rf) == sizeof(saved_regs)) {
+            restore_rip = saved_regs.rip;
+            restore_rsp = saved_regs.rsp;
+            fprintf(stderr, "[parasite] Restore RIP: 0x%llx, RSP: 0x%llx\n",
+                    (unsigned long long)restore_rip, (unsigned long long)restore_rsp);
+        }
+        fclose(rf);
+    }
+
+    uint64_t ctrl_off = parasite_code_size;
+    uint64_t args_off = ctrl_off + sizeof(ControlBlock);
+    uint64_t regions_off = args_off + sizeof(ParasiteArgs);
+    uint64_t scratch_off = regions_off + num_regions * sizeof(RegionDesc);
+    
+    uint64_t max_data_size = 0;
+    for (size_t i = 0; i < num_regions; i++) {
+        RegionDesc *r = &regions[i];
+        if (r->flags & (IS_VDSO | IS_VSYSCALL)) continue;
+        if (r->size > 256 * 1024 * 1024) continue;  // Skip huge regions (>256MB)
+        
+        char binpath[512];
+        snprintf(binpath, sizeof(binpath), "%s/mem/%016lx-%016lx.bin",
+                indir, (unsigned long)r->start, (unsigned long)(r->start + r->size));
+        struct stat st;
+        if (stat(binpath, &st) == 0 && (uint64_t)st.st_size > max_data_size) {
+            max_data_size = (uint64_t)st.st_size;
+        }
+    }
+    uint64_t scratch_size = max_data_size > 0 ? max_data_size : (4 * 1024 * 1024);
+    uint64_t stack_off = scratch_off + scratch_size;
+    uint64_t total_size = stack_off + STACK_SIZE;
+    
+    fprintf(stderr, "[parasite] Total injection size: %lu bytes\n", total_size);
+
+    uint64_t parasite_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, total_size,
+        PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    fprintf(stderr, "[parasite] mmap returned: 0x%llx\n", (unsigned long long)parasite_addr);
+    
+    if ((long)parasite_addr < 0) {
+        fprintf(stderr, "[parasite] Failed to allocate memory in target\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    fprintf(stderr, "[parasite] Allocated parasite space at 0x%llx\n", (unsigned long long)parasite_addr);
+
+    if (!write_bytes_to_pid(pid, parasite_addr, parasite_start_ptr, parasite_code_size)) {
+        fprintf(stderr, "[parasite] Failed to write parasite blob\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] Parasite blob written\n");
+
+    ControlBlock ctrl = {0};
+    ctrl.cmd = CMD_WAIT;
+    uint64_t ctrl_addr = parasite_addr + ctrl_off;
+    if (!write_bytes_to_pid(pid, ctrl_addr, &ctrl, sizeof(ctrl))) {
+        fprintf(stderr, "[parasite] Failed to write ControlBlock\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] ControlBlock written\n");
+
+    ParasiteArgs args = {0};
+    args.num_regions = num_regions;
+    args.parasite_start = parasite_addr;
+    args.parasite_size = total_size;
+    args.ctrl_offset = ctrl_off;
+    args.stack_offset = stack_off;
+    args.scratch_offset = scratch_off;
+    args.scratch_size = scratch_size;
+    args.restore_rip = restore_rip;
+    args.restore_rsp = restore_rsp;
+    
+    uint64_t args_addr = parasite_addr + args_off;
+    if (!write_bytes_to_pid(pid, args_addr, &args, sizeof(args))) {
+        fprintf(stderr, "[parasite] Failed to write ParasiteArgs\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] ParasiteArgs written\n");
+
+    uint64_t regions_addr = parasite_addr + regions_off;
+    if (!write_bytes_to_pid(pid, regions_addr, regions, num_regions * sizeof(RegionDesc))) {
+        fprintf(stderr, "[parasite] Failed to write RegionDescs\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] RegionDescs written\n");
+
+    uint64_t stack_top = parasite_addr + stack_off + STACK_SIZE - 8;
+
+    regs_t regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
+        perror("PTRACE_GETREGS");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    regs.rip = parasite_addr;
+    regs.r12 = args_addr;
+    regs.rsp = stack_top;
+    regs.rax = 0;
+    regs.orig_rax = -1;
+
+    fprintf(stderr, "[parasite] Setting target process registers...\n");
+    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) {
+        perror("PTRACE_SETREGS");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    
+    fprintf(stderr, "[parasite] Set registers: RIP=0x%llx R12=0x%llx RSP=0x%llx\n",
+            (unsigned long long)regs.rip, (unsigned long long)regs.r12, (unsigned long long)regs.rsp);
+
+    int stop_sig = WIFSTOPPED(status) ? WSTOPSIG(status) : 0;
+    if (stop_sig == SIGSTOP) stop_sig = 0;
+    fprintf(stderr, "[parasite] Passing signal %d to PTRACE_CONT\n", stop_sig);
+    ptrace(PTRACE_CONT, pid, NULL, (void*)(long)stop_sig);
+
+    waitpid(pid, &status, __WALL);
+    fprintf(stderr, "[parasite] After continue: WIFSTOPPED=%d WSTOPSIG=%d status=0x%x\n",
+            WIFSTOPPED(status), WIFSTOPPED(status) ? WSTOPSIG(status) : -1, status);
+    
+    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+        fprintf(stderr, "[parasite] Failed to get initial int3\n");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] Parasite ready (first int3 received)\n");
+
+    fprintf(stderr, "[parasite] Pre-allocating %zu memory regions...\n", num_regions);
+    for (size_t i = 0; i < num_regions; i++) {
+        RegionDesc *r = &regions[i];
+        if (r->flags & (IS_VDSO | IS_VSYSCALL)) continue;
+        if (r->start == parasite_addr) continue;
+        if (r->size > 256 * 1024 * 1024) {
+            r->flags |= IS_SKIP;
+            continue;
+        }
+        
+        char binpath[512];
+        snprintf(binpath, sizeof(binpath), "%s/mem/%016lx-%016lx.bin",
+                indir, (unsigned long)r->start, (unsigned long)(r->start + r->size));
+        struct stat st;
+        uint64_t data_size = 0;
+        if (stat(binpath, &st) == 0) {
+            data_size = (uint64_t)st.st_size;
+        }
+        if (data_size == 0) continue;
+        
+        uint64_t new_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, r->start, r->size,
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if ((long)new_addr < 0) {
+            fprintf(stderr, "[parasite]   Warning: mmap at 0x%llx failed, trying without MAP_FIXED\n",
+                    (unsigned long long)r->start);
+            new_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, r->size,
+                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if ((long)new_addr > 0) {
+                r->start = new_addr;
+                fprintf(stderr, "[parasite]   Allocated at new address 0x%llx\n", (unsigned long long)new_addr);
+            }
+        }
+    }
+    if (!write_bytes_to_pid(pid, regions_addr, regions, num_regions * sizeof(RegionDesc))) {
+        fprintf(stderr, "[parasite] Failed to update RegionDescs with new addresses\n");
+    }
+
+    char mem_path[256];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+    int mem_fd = open(mem_path, O_RDWR);
+    if (mem_fd < 0) {
+        perror("open /proc/pid/mem");
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    for (size_t i = 0; i < num_regions; i++) {
+        RegionDesc *r = &regions[i];
+        
+        if (r->flags & IS_VDSO) {
+            fprintf(stderr, "[parasite] Skipping region %zu: vDSO\n", i);
+            continue;
+        }
+        if (r->flags & IS_VSYSCALL) {
+            fprintf(stderr, "[parasite] Skipping region %zu: vsyscall\n", i);
+            continue;
+        }
+        if (r->start == parasite_addr) {
+            fprintf(stderr, "[parasite] Skipping region %zu: parasite region\n", i);
+            continue;
+        }
+
+        fprintf(stderr, "[parasite] Processing region %zu: 0x%llx size 0x%llx\n", 
+                i, (unsigned long long)r->start, (unsigned long long)r->size);
+
+        char binpath[512];
+        snprintf(binpath, sizeof(binpath), "%s/mem/%016lx-%016lx.bin",
+                 indir, (unsigned long)r->start, (unsigned long)(r->start + r->size));
+
+        struct stat st;
+        uint64_t data_size = 0;
+        if (stat(binpath, &st) == 0) {
+            data_size = (uint64_t)st.st_size;
+        }
+
+        if (data_size > 0) {
+            fprintf(stderr, "[parasite]   Writing checkpoint data (0x%llx bytes) to scratch area\n",
+                    (unsigned long long)data_size);
+            int data_fd = open(binpath, O_RDONLY);
+            if (data_fd >= 0) {
+                char *buf = malloc(data_size);
+                ssize_t rd = read(data_fd, buf, data_size);
+                if (rd > 0) {
+                    uint64_t scratch_addr = parasite_addr + args.scratch_offset;
+                    if (!write_bytes_to_pid(pid, scratch_addr, buf, rd)) {
+                        fprintf(stderr, "[parasite]   WARNING: Failed to write to scratch area\n");
+                    }
+                }
+                free(buf);
+                close(data_fd);
+            }
+        } else {
+            fprintf(stderr, "[parasite]   No checkpoint data for this region (size=0)\n");
+        }
+
+        ctrl.cmd = CMD_NEXT;
+        ctrl.region_index = i;
+        ctrl.write_addr = r->start;
+        ctrl.write_size = data_size;
+        
+        pwrite(mem_fd, &ctrl, sizeof(ctrl), ctrl_addr);
+        
+        ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+        waitpid(pid, &status, __WALL);
+        if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+            fprintf(stderr, "[parasite]   ERROR: Region restore int3 not received, status=0x%x\n", status);
+            break;
+        }
+        fprintf(stderr, "[parasite]   Region %zu fully restored\n", i);
+    }
+
+    fprintf(stderr, "[parasite] All regions processed, sending GO signal...\n");
+
+    ctrl.cmd = CMD_GO;
+    pwrite(mem_fd, &ctrl, sizeof(ctrl), ctrl_addr);
+
+    ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+    waitpid(pid, &status, __WALL);
+    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+        fprintf(stderr, "[parasite] Final int3 not received, status=0x%x\n", status);
+        close(mem_fd);
+        free(regions);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    fprintf(stderr, "[parasite] All done int3 received, restoring registers...\n");
+
+    rf = fopen(regpath, "rb");
+    if (rf) {
+        regs_t saved_regs;
+        if (fread(&saved_regs, 1, sizeof(saved_regs), rf) == sizeof(saved_regs)) {
+            if (ptrace(PTRACE_SETREGS, pid, 0, &saved_regs) == -1) {
+                perror("PTRACE_SETREGS (restore)");
+            }
+            fprintf(stderr, "[parasite] Registers restored\n");
+        }
+        fclose(rf);
+    }
+
+    ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+    close(mem_fd);
+    free(regions);
+
+    fprintf(stderr, "[parasite] Parasite restore complete\n");
 }
