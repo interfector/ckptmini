@@ -67,3 +67,13 @@ tests/%.o: tests/%.c
 clean:
 	rm -f $(OBJECTS) $(TEST_TARGETS) $(TEST_OBJS) tests/testlib.so tests/hijacklib.so $(TARGET)
 	rm -f $(PARASITE) $(PARASITE_BIN) $(PARASITE_OBJ)
+
+PREFIX ?= /usr/local
+INSTALL_DIR = $(DESTDIR)$(PREFIX)/bin
+
+install: $(TARGET)
+	mkdir -p $(INSTALL_DIR)
+	cp $(TARGET) $(INSTALL_DIR)
+
+uninstall:
+	rm -f $(INSTALL_DIR)/$(TARGET)
