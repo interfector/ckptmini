@@ -30,8 +30,6 @@ typedef struct {
     uint64_t stack_offset;
     uint64_t scratch_offset;  // Offset to scratch area within parasite mapping
     uint64_t scratch_size;    // Size of scratch area
-    uint64_t restore_rip;
-    uint64_t restore_rsp;
 } ParasiteArgs;
 
 typedef struct {

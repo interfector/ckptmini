@@ -18,7 +18,6 @@
 
 void parasite_entry(void) __attribute__((naked));
 void parasite_main(ParasiteArgs *args);
-void self_unmap_and_jump(uint64_t parasite_start, uint64_t parasite_size, uint64_t target_rip, uint64_t target_rsp);
 
 // Entry point - MUST BE FIRST
 void parasite_entry(void) {
@@ -166,13 +165,8 @@ void parasite_main(ParasiteArgs *args) {
         asm volatile ("int3" : : : "memory");
     }
 
-    // Final int3: "All regions done, waiting for register restore and GO signal"
+    // Final int3: "All regions done". The host now takes over: it unmaps the
+    // parasite region and restores the checkpointed register file before
+    // letting the process resume at the saved RIP.
     asm volatile ("int3" : : : "memory");
-    
-    // Spin-wait for CMD_GO after register restoration
-    while (ctrl->cmd != CMD_GO) {
-        asm volatile ("pause" : : : "memory");
-    }
-
-    self_unmap_and_jump(args->parasite_start, args->parasite_size, args->restore_rip, args->restore_rsp);
 }
