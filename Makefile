@@ -29,8 +29,8 @@ $(TARGET): $(OBJECTS) $(PARASITE_OBJ)
 $(PARASITE_OBJ): $(PARASITE_BIN)
 	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $(PARASITE_BIN) $(PARASITE_OBJ)
 
-$(PARASITE_BIN): parasite.c self_unmap_jump.S
-	gcc -nostdlib -nodefaultlibs -fpic -fno-stack-protector -o $(PARASITE) parasite.c self_unmap_jump.S
+$(PARASITE_BIN): parasite.c
+	gcc -nostdlib -nodefaultlibs -fpic -fno-stack-protector -o $(PARASITE) parasite.c
 	objcopy -O binary --only-section=.text $(PARASITE) $(PARASITE_BIN)
 
 parasite: $(PARASITE_BIN)

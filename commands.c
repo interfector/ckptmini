@@ -1820,8 +1820,6 @@ void inject_and_restore(pid_t pid, const char *indir) {
     args.stack_offset = stack_off;
     args.scratch_offset = scratch_off;
     args.scratch_size = scratch_size;
-    args.restore_rip = restore_rip;
-    args.restore_rsp = restore_rsp;
     
     uint64_t args_addr = parasite_addr + args_off;
     if (!write_bytes_to_pid(pid, args_addr, &args, sizeof(args))) {
@@ -2013,7 +2011,36 @@ void inject_and_restore(pid_t pid, const char *indir) {
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return;
     }
-    fprintf(stderr, "[parasite] All done int3 received, restoring registers...\n");
+    fprintf(stderr, "[parasite] All done int3 received, unmapping parasite + restoring registers...\n");
+
+    /* Unmap the parasite injection region BEFORE restoring the checkpointed
+       register file. This is done host-side (not by the parasite's old
+       self_unmap_and_jump stub, which only restored rsp/rip and would silently
+       drop the other saved registers). We point the injected syscall at
+       restore_rip (the real, still-mapped user code) so remote_syscall_x64's
+       patch/restore cycle stays valid — the parasite region itself is about
+       to vanish. */
+    if (restore_rip != 0) {
+        regs_t pregs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &pregs) == -1) {
+            perror("PTRACE_GETREGS (parasite pregs)");
+        } else {
+            pregs.rip = restore_rip;
+            ptrace(PTRACE_SETREGS, pid, 0, &pregs);
+        }
+        long munmap_ret = remote_syscall_x64(pid, __NR_munmap, parasite_addr, total_size, 0, 0, 0, 0);
+        if (munmap_ret != 0) {
+            if (munmap_ret < 0)
+                fprintf(stderr, "[parasite] WARNING: munmap of parasite region failed: %ld (%s)\n",
+                        munmap_ret, strerror((int)-munmap_ret));
+            else
+                fprintf(stderr, "[parasite] WARNING: munmap of parasite region returned unexpected %ld\n", munmap_ret);
+        } else {
+            fprintf(stderr, "[parasite] Parasite region unmapped\n");
+        }
+    } else {
+        fprintf(stderr, "[parasite] WARNING: no valid restore_rip; skipping parasite unmap\n");
+    }
 
     rf = fopen(regpath, "rb");
     if (rf) {
