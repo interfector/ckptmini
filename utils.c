@@ -434,6 +434,7 @@ void usage(const char *prog) {
     fprintf(stderr, "  %-24s %s\n", "step <pid> [n]", "Step N instructions");
     fprintf(stderr, "  %-24s %s\n", "trace <pid>", "Trace syscalls (strace-like)");
     fprintf(stderr, "  %-24s %s\n", "itrace <pid>", "Single-step and print instructions");
+    fprintf(stderr, "  %-24s %s\n", "ftrace <pid> <sym> [sym...]", "Trace calls to libc functions");
     
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Breakpoints:");
     fprintf(stderr, "  %-24s %s\n", "breakpoint <pid> <addr>", "Set execution breakpoint");

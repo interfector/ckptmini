@@ -1,5 +1,6 @@
 #include "ckptmini.h"
 #include "parasite.h"
+#include <ctype.h>
 
 static void print_perms_colored(const char *perms, bool tty) {
     if (!tty) { printf("%-4s", perms); return; }
@@ -629,6 +630,481 @@ void cmd_itrace(pid_t pid) {
     }
 
     /* Detach with signal 0: the tracee resumes without any pending SIGTRAP. */
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+
+    if (g_interrupt) {
+        if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
+        else printf("Stopped tracing PID %d (detached; process continues).\n", pid);
+    }
+}
+
+/* ---------------- function (symbol) tracing ---------------- */
+
+typedef struct {
+    const char *name;
+    const char *sig;   /* s=string, i=int, u=uint, x/p=pointer, c=char, v=va_list, F<n>=printf-family fmt at arg n */
+} fspec_t;
+
+static const fspec_t g_fspecs[] = {
+    /* printf family: F<n> = format string is argument n, remaining args are varargs */
+    { "printf",    "F0" },
+    { "fprintf",   "F1" },
+    { "sprintf",   "F1" },
+    { "snprintf",  "F2" },
+    { "dprintf",   "F1" },
+    { "asprintf",  "F1" },
+    { "vprintf",   "s v" },
+    { "vfprintf",  "p s v" },
+    { "vsprintf",  "s s v" },
+    { "vsnprintf", "s i s v" },
+    { "vasprintf", "p s v" },
+    /* strings */
+    { "puts",    "s" },
+    { "strlen",  "s" },
+    { "strcmp",  "s s" },
+    { "strncmp", "s s i" },
+    { "strchr",  "s c" },
+    { "strstr",  "s s" },
+    { "strdup",  "s" },
+    { "strcpy",  "p s" },
+    { "strncpy", "p s i" },
+    { "strcat",  "p s" },
+    { "strncat", "p s i" },
+    { "getenv",  "s" },
+    { "atoi",    "s" },
+    { "atol",    "s" },
+    { "strtol",  "s p i" },
+    { "system",  "s" },
+    { "execve",  "s p p" },
+    /* memory */
+    { "malloc",  "i" },
+    { "calloc",  "i i" },
+    { "realloc", "p i" },
+    { "free",    "p" },
+    { "memcpy",  "p p i" },
+    { "memmove", "p p i" },
+    { "memset",  "p i i" },
+    /* file io */
+    { "open",    "s i i" },
+    { "openat",  "i s i i" },
+    { "creat",   "s i" },
+    { "close",   "i" },
+    { "read",    "i p i" },
+    { "write",   "i p i" },
+    { "lseek",   "i i i" },
+    { "access",  "s i" },
+    { "stat",    "s p" },
+    { "lstat",   "s p" },
+    { "fstat",   "i p" },
+    { "opendir", "s" },
+    { "readlink","s p i" },
+    /* misc */
+    { "getpid",  "" },
+    { "rand",    "" },
+    { "srand",   "u" },
+    { "time",    "p" },
+    { "sleep",   "u" },
+    { "usleep",  "u" },
+    { "exit",    "i" },
+    { "abort",   "" },
+};
+#define N_FSPECS (sizeof(g_fspecs)/sizeof(g_fspecs[0]))
+
+static const char *fspec_for(const char *name) {
+    for (size_t i = 0; i < N_FSPECS; i++)
+        if (!strcmp(name, g_fspecs[i].name)) return g_fspecs[i].sig;
+    return NULL;
+}
+
+/* Per-function breakpoint record */
+typedef struct {
+    uint64_t addr;
+    char name[128];
+    const char *sig;
+    unsigned char orig_byte;
+    bool armed;
+} fbp_t;
+
+static fbp_t g_fbps[128];
+static int g_nfbps = 0;
+
+/* Get the n-th argument (0-based) of the current call.
+   Args 0..5 live in GP registers, args 6+ on the stack above the return address. */
+static uint64_t get_arg_val(pid_t pid, const regs_t *regs, int n) {
+    switch (n) {
+    case 0: return regs->rdi;
+    case 1: return regs->rsi;
+    case 2: return regs->rdx;
+    case 3: return regs->rcx;
+    case 4: return regs->r8;
+    case 5: return regs->r9;
+    default: {
+        uint64_t v = 0;
+        uint64_t sp = regs->rsp + 8 + (uint64_t)(n - 6) * 8;
+        if (!read_bytes_from_pid(pid, sp, &v, 8)) return 0;
+        return v;
+    }}
+}
+
+/* Read the n-th SSE (XMM) register as a double. */
+static bool get_fp_arg(pid_t pid, int xmm_idx, double *out) {
+    struct user_fpregs_struct fp;
+    if (ptrace(PTRACE_GETFPREGS, pid, 0, &fp) == -1) return false;
+    memcpy(out, &fp.xmm_space[xmm_idx * 4], sizeof(double));
+    return true;
+}
+
+/* Read a NUL-terminated string from the target into buf (cap bytes). */
+static size_t read_pid_cstr(pid_t pid, uint64_t addr, unsigned char *buf, size_t cap) {
+    size_t got = 0;
+    uint64_t pos = addr;
+    while (got < cap) {
+        size_t want = cap - got;
+        size_t to_page = 0x1000 - ((size_t)pos & 0xfff);
+        if (to_page < want) want = to_page;
+        if (want == 0) want = 1;
+        if (!read_bytes_from_pid(pid, pos, buf + got, want)) {
+            if (want == 1) break;
+            want = 1;
+            if (!read_bytes_from_pid(pid, pos, buf + got, 1)) break;
+        }
+        got += want;
+        if (memchr(buf + got - want, '\0', want)) break;
+        pos += want;
+    }
+    if (got == 0) return 0;
+    if (buf[got - 1] != '\0') {
+        if (got < cap) buf[got] = '\0';
+        else buf[got - 1] = '\0';
+    }
+    return got;
+}
+
+static void print_pid_str(pid_t pid, uint64_t addr) {
+    unsigned char raw[256];
+    size_t got = read_pid_cstr(pid, addr, raw, sizeof(raw) - 1);
+    if (got == 0) { printf("0x%llx", (unsigned long long)addr); return; }
+    bool truncated = (memchr(raw, '\0', got) == NULL);
+    size_t len = strnlen((char*)raw, got);
+    printf("\"");
+    size_t shown = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = raw[i];
+        if (shown >= 80) break;
+        switch (c) {
+        case '"':  printf("\\\""); shown++; break;
+        case '\\': printf("\\\\"); shown++; break;
+        case '\n': printf("\\n"); shown++; break;
+        case '\t': printf("\\t"); shown++; break;
+        default:
+            if (c >= 0x20 && c < 0x7f) { putchar(c); shown++; }
+            else { printf("\\x%02x", c); shown += 4; }
+            break;
+        }
+    }
+    if (truncated || len > 80) printf("...");
+    printf("\"");
+}
+
+/* Print a single argument given its type tag (see fspec_t). */
+static void print_arg(pid_t pid, const regs_t *regs, char t, int arg_idx) {
+    switch (t) {
+    case 's': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        print_pid_str(pid, a);
+        break;
+    }
+    case 'p': case 'x': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        printf("0x%llx", (unsigned long long)a);
+        break;
+    }
+    case 'c': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        unsigned char c = (unsigned char)a;
+        if (c >= 0x20 && c < 0x7f) printf("'%c'", c);
+        else printf("'\\x%02x'", c);
+        break;
+    }
+    case 'i': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        printf("%lld", (long long)a);
+        break;
+    }
+    case 'u': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        printf("%llu", (unsigned long long)a);
+        break;
+    }
+    case 'v': {
+        uint64_t a = get_arg_val(pid, regs, arg_idx);
+        printf("va_list 0x%llx", (unsigned long long)a);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* Print a printf-family call: the format string plus the varargs it consumes.
+   base_gp = GP-register index of the first variadic argument (named args use rdi..). */
+static void print_fmt_variadic(pid_t pid, const regs_t *regs, uint64_t fmt_addr, int base_gp) {
+    unsigned char fmt[256];
+    size_t got = read_pid_cstr(pid, fmt_addr, fmt, sizeof(fmt) - 1);
+    if (got == 0) { printf("0x%llx", (unsigned long long)fmt_addr); return; }
+    bool truncated = (memchr(fmt, '\0', got) == NULL);
+    size_t flen = strnlen((char*)fmt, got);
+
+    printf("\"");
+    for (size_t i = 0; i < flen; i++) {
+        unsigned char c = fmt[i];
+        if (c == '"') printf("\\\"");
+        else if (c == '\\') printf("\\\\");
+        else if (c == '\n') printf("\\n");
+        else if (c >= 0x20 && c < 0x7f) putchar(c);
+        else printf("\\x%02x", c);
+    }
+    if (truncated) printf("...");
+    printf("\"");
+
+    /* Parse conversions to determine how many/which varargs to print. */
+    int gp = 0, fp = 0;
+    size_t i = 0;
+    while (i < flen) {
+        if (fmt[i] != '%') { i++; continue; }
+        i++;  /* skip '%' */
+        while (i < flen && strchr("-+ #0'", fmt[i])) i++;            /* flags */
+        if (i < flen && fmt[i] == '*') {                             /* width */
+            (void)get_arg_val(pid, regs, base_gp + gp); gp++;
+            i++;
+        } else {
+            while (i < flen && isdigit(fmt[i])) i++;
+        }
+        if (i < flen && fmt[i] == '.') {                             /* precision */
+            i++;
+            if (i < flen && fmt[i] == '*') {
+                (void)get_arg_val(pid, regs, base_gp + gp); gp++;
+                i++;
+            } else {
+                while (i < flen && isdigit(fmt[i])) i++;
+            }
+        }
+        while (i < flen && strchr("hlLzjt", fmt[i])) {               /* length */
+            if ((fmt[i] == 'l' || fmt[i] == 'h') && i + 1 < flen && fmt[i + 1] == fmt[i]) i++;
+            i++;
+        }
+        if (i >= flen) break;
+        char conv = fmt[i];
+        if (conv == '%') { i++; continue; }
+        uint64_t a;
+        switch (conv) {
+        case 's': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", "); print_pid_str(pid, a); break;
+        case 'c': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", '%c'", (unsigned char)a); break;
+        case 'p': case 'n': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", 0x%llx", (unsigned long long)a); break;
+        case 'd': case 'i': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", %lld", (long long)a); break;
+        case 'u': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", %llu", (unsigned long long)a); break;
+        case 'o': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", %llo", (unsigned long long)a); break;
+        case 'x': case 'X': a = get_arg_val(pid, regs, base_gp + gp); gp++; printf(", 0x%llx", (unsigned long long)a); break;
+        case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': {
+            double d = 0;
+            if (get_fp_arg(pid, fp, &d)) printf(", %g", d);
+            else printf(", <unreadable fp>");
+            fp++;
+            break;
+        }
+        default: break;
+        }
+        i++;
+    }
+}
+
+/* Handle a breakpoint hit at function g_fbps[idx]: print args, then do the
+   restore-single-step-rearm dance. Returns a signal to deliver on the next
+   PTRACE_CONT (0 = none). */
+static int handle_fbp_hit(pid_t pid, int idx, unsigned long long call_no) {
+    fbp_t *b = &g_fbps[idx];
+
+    regs_t regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) return 0;
+    regs.rip -= 1;  /* point back at the function entry */
+
+    if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " %s(", call_no, b->name);
+    else printf("[%06llu] %s(", call_no, b->name);
+
+    if (b->sig && b->sig[0] == 'F') {
+        int fmt_idx = b->sig[1] - '0';
+        uint64_t fmt_addr = get_arg_val(pid, &regs, fmt_idx);
+        print_fmt_variadic(pid, &regs, fmt_addr, fmt_idx + 1);
+    } else if (b->sig) {
+        int arg = 0;
+        bool first = true;
+        for (const char *s = b->sig; *s; s++) {
+            if (*s == ' ') continue;
+            if (!first) printf(", ");
+            print_arg(pid, &regs, *s, arg);
+            first = false;
+            arg++;
+        }
+    } else {
+        /* unknown function: show the raw GP args as hex */
+        for (int i = 0; i < 6; i++) {
+            if (i) printf(", ");
+            printf("0x%llx", (unsigned long long)get_arg_val(pid, &regs, i));
+        }
+    }
+    printf(")\n");
+    fflush(stdout);
+
+    /* Restore the original first instruction and single-step over it. */
+    uint64_t addr = b->addr;
+    errno = 0;
+    unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)addr, NULL);
+    if (!(w == (unsigned long)-1 && errno)) {
+        unsigned long nw = (w & ~0xffUL) | (unsigned long)b->orig_byte;
+        ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)nw);
+    }
+    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) return 0;
+
+    if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) return 0;
+
+    int st;
+    int deliver = 0;
+    while (1) {
+        if (waitpid_eintr(pid, &st) == -1) break;
+        if (!WIFSTOPPED(st)) break;
+        int sig = WSTOPSIG(st);
+        if (sig == SIGTRAP) break;                      /* done stepping */
+        if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+        deliver = sig;                                  /* interrupted by a real signal */
+        break;
+    }
+
+    /* Re-arm the breakpoint. */
+    errno = 0;
+    w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)addr, NULL);
+    if (!(w == (unsigned long)-1 && errno)) {
+        unsigned long nw = (w & ~0xffUL) | 0xccUL;
+        ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)nw);
+    }
+    b->armed = true;
+    return deliver;
+}
+
+void cmd_ftrace(pid_t pid, int nnames, char **names) {
+    g_nfbps = 0;
+
+    /* Resolve each requested symbol (reuses the existing dlsym machinery). */
+    for (int i = 0; i < nnames && g_nfbps < (int)(sizeof(g_fbps)/sizeof(g_fbps[0])); i++) {
+        uint64_t a = cmd_resolve(pid, names[i]);
+        if (a == 0) continue;
+        fbp_t *b = &g_fbps[g_nfbps];
+        b->addr = a;
+        snprintf(b->name, sizeof(b->name), "%s", names[i]);
+        b->sig = fspec_for(names[i]);
+        b->armed = false;
+        g_nfbps++;
+    }
+    if (g_nfbps == 0) { fprintf(stderr, "ftrace: no resolvable symbols\n"); return; }
+
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM)      { fprintf(stderr, "ftrace: permission denied\n"); }
+        else if (errno == ESRCH) { fprintf(stderr, "ftrace: no such process %d\n", pid); }
+        else DIE("PTRACE_ATTACH ftrace");
+        return;
+    }
+    int st;
+    if (waitpid_eintr(pid, &st) == -1) {
+        perror("ftrace: waitpid attach");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    /* Ctrl+C stops the trace cleanly instead of killing us while the tracee
+       is stopped at a breakpoint (which would deliver SIGTRAP on detach). */
+    install_sigint_stop();
+
+    /* Arm a breakpoint at each function entry. */
+    int armed = 0;
+    for (int i = 0; i < g_nfbps; i++) {
+        fbp_t *b = &g_fbps[i];
+        errno = 0;
+        unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)b->addr, NULL);
+        if (w == (unsigned long)-1 && errno) continue;
+        b->orig_byte = (unsigned char)(w & 0xff);
+        unsigned long nw = (w & ~0xffUL) | 0xccUL;
+        if (ptrace(PTRACE_POKETEXT, pid, (void*)b->addr, (void*)nw) == -1) continue;
+        b->armed = true;
+        armed++;
+    }
+    if (armed == 0) {
+        fprintf(stderr, "ftrace: could not arm any breakpoints\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Tracing %d function(s) in PID %d. Press Ctrl+C to stop.\n" A_RESET, armed, pid);
+    else printf("Tracing %d function(s) in PID %d...\n", armed, pid);
+
+    unsigned long long calls = 0;
+    int deliver = 0;
+    while (!g_interrupt) {
+        if (ptrace(PTRACE_CONT, pid, NULL, (void*)(long)deliver) == -1) break;
+        deliver = 0;
+        if (waitpid_eintr(pid, &st) == -1) break;
+
+        if (WIFEXITED(st)) {
+            printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
+            break;
+        }
+        if (WIFSIGNALED(st)) {
+            printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
+            break;
+        }
+        if (!WIFSTOPPED(st)) continue;
+
+        int sig = WSTOPSIG(st);
+        if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+
+        if (sig != SIGTRAP) {
+            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
+            else printf("(stopped by signal %d)\n", sig);
+            deliver = sig;   /* let the target's handler see it */
+            continue;
+        }
+
+        regs_t regs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+        uint64_t bp = regs.rip - 1;
+
+        int idx = -1;
+        for (int i = 0; i < g_nfbps; i++) {
+            if (g_fbps[i].addr == bp) { idx = i; break; }
+        }
+
+        if (idx < 0) {
+            /* not one of ours: deliver the stray SIGTRAP */
+            if (g_is_tty) printf(A_DIM "  (unexpected SIGTRAP at 0x%llx, delivered)\n" A_RESET,
+                                 (unsigned long long)regs.rip);
+            else printf("(unexpected SIGTRAP at 0x%llx, delivered)\n", (unsigned long long)regs.rip);
+            deliver = SIGTRAP;
+            continue;
+        }
+
+        calls++;
+        deliver = handle_fbp_hit(pid, idx, calls);
+        if (g_interrupt) break;   /* Ctrl+C landed during the single-step dance */
+    }
+
+    /* Restore all breakpoints and detach cleanly. */
+    for (int i = 0; i < g_nfbps; i++) {
+        if (!g_fbps[i].armed) continue;
+        errno = 0;
+        unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)g_fbps[i].addr, NULL);
+        if (w == (unsigned long)-1 && errno) continue;
+        unsigned long nw = (w & ~0xffUL) | (unsigned long)g_fbps[i].orig_byte;
+        ptrace(PTRACE_POKETEXT, pid, (void*)g_fbps[i].addr, (void*)nw);
+        g_fbps[i].armed = false;
+    }
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 
     if (g_interrupt) {

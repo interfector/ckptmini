@@ -518,6 +518,15 @@ void cmd_trace(pid_t pid);
 void cmd_itrace(pid_t pid);
 
 /**
+ * @brief Trace calls to the given functions, printing their arguments
+ * (printf-family format strings are parsed to print varargs)
+ * @param pid Process ID
+ * @param nnames Number of symbol names
+ * @param names Array of symbol names (e.g. "printf", "strlen")
+ */
+void cmd_ftrace(pid_t pid, int nnames, char **names);
+
+/**
  * @brief Change memory protection
  * @param pid Process ID
  * @param addr Start address
