@@ -134,10 +134,12 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 | `fds <pid>` | List all open file descriptors and their targets |
 | `signals <pid>` | Display signal handler configuration |
 | `trace <pid>` | Trace syscalls (strace-like output) |
+| `itrace <pid>` | Single-step and print each executed instruction (raw bytes for now) |
 
 **Limitations:**
 - `backtrace` may be inaccurate with optimized binaries or missing debug symbols
 - `trace` is basic; doesn't capture syscall arguments in full
+- `itrace` prints raw instruction bytes (no disassembler yet); disassembly planned for the future
 
 ### Debugging
 

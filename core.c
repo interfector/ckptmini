@@ -652,19 +652,32 @@ void step_pid(pid_t pid, int max_steps) {
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno != EPERM) DIE("PTRACE_ATTACH in step");
     }
-    int status; if (waitpid(pid, &status, __WALL) == -1) DIE("waitpid step attach");
+    int status; if (waitpid_eintr(pid, &status) == -1) DIE("waitpid step attach");
     (void)ptrace(PTRACE_SETOPTIONS, pid, 0, (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXIT));
     (void)kill(pid, SIGCONT);
 
-    for (int i=0; i<max_steps || max_steps<=0; i++) {
+    /* Catch SIGINT so Ctrl+C stops stepping instead of killing us while the
+       tracee sits at a single-step SIGTRAP stop (which would be delivered as
+       SIGTRAP on detach, killing the target with "trace trap (core dumped)"). */
+    install_sigint_stop();
+
+    for (int i=0; (i<max_steps || max_steps<=0) && !g_interrupt; i++) {
         if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) DIE("PTRACE_SINGLESTEP");
-        if (waitpid(pid, &status, __WALL) == -1) DIE("waitpid step");
+        if (waitpid_eintr(pid, &status) == -1) DIE("waitpid step");
         if (WIFSTOPPED(status)) {
             int sig = WSTOPSIG(status);
             regs_t r; if (ptrace(PTRACE_GETREGS, pid, 0, &r) == -1) DIE("GETREGS after step");
             if (sig == SIGTRAP) {
                 dump_regs_and_bytes(pid, &r);
-                if (max_steps>0 && i+1>=max_steps) return;
+                if (max_steps>0 && i+1>=max_steps) {
+                    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                    return;
+                }
+                if (g_interrupt) {
+                    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                    fprintf(stderr, "[step] interrupted; detached, process continues.\n");
+                    return;
+                }
                 continue;
             }
             if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
@@ -674,6 +687,7 @@ void step_pid(pid_t pid, int max_steps) {
                     fprintf(stderr, "[step] SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
             }
             dump_regs_and_bytes(pid, &r);
+            ptrace(PTRACE_DETACH, pid, NULL, (void *)(long)sig);
             return;
         } else if (WIFEXITED(status)) {
             fprintf(stderr, "[step] process exited code=%d\n", WEXITSTATUS(status));
@@ -683,6 +697,9 @@ void step_pid(pid_t pid, int max_steps) {
             return;
         }
     }
+    /* Loop ended early (Ctrl+C) while the tracee is stopped at a SIGTRAP stop. */
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (g_interrupt) fprintf(stderr, "[step] interrupted; detached, process continues.\n");
 }
 
 void show_maps_and_regs(show_mode_t mode, const char *arg) {

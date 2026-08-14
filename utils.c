@@ -2,6 +2,30 @@
 
 bool g_is_tty = false;
 
+volatile sig_atomic_t g_interrupt = 0;
+
+static void sigint_stop_handler(int sig) {
+    (void)sig;
+    g_interrupt = 1;
+}
+
+void install_sigint_stop(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigint_stop_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) == -1)
+        perror("sigaction(SIGINT)");
+}
+
+pid_t waitpid_eintr(pid_t pid, int *status) {
+    pid_t r;
+    do {
+        r = waitpid(pid, status, __WALL);
+    } while (r == -1 && errno == EINTR);
+    return r;
+}
+
 static const reg_entry_t reg_table[] = {
     { "r15", 0x00 },
     { "r14", 0x08 },
@@ -408,7 +432,8 @@ void usage(const char *prog) {
     fprintf(stderr, "  %-24s %s\n", "resume <pid>", "Continue stopped process");
     fprintf(stderr, "  %-24s %s\n", "stop <pid>", "Stop process with SIGSTOP");
     fprintf(stderr, "  %-24s %s\n", "step <pid> [n]", "Step N instructions");
-    fprintf(stderr, "  %-24s %s\n", "trace <pid>", "Single-step and print instructions");
+    fprintf(stderr, "  %-24s %s\n", "trace <pid>", "Trace syscalls (strace-like)");
+    fprintf(stderr, "  %-24s %s\n", "itrace <pid>", "Single-step and print instructions");
     
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Breakpoints:");
     fprintf(stderr, "  %-24s %s\n", "breakpoint <pid> <addr>", "Set execution breakpoint");

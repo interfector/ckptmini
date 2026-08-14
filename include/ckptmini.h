@@ -189,6 +189,27 @@ bool is_tty(void);
 extern bool g_is_tty;
 
 /**
+ * @brief Global flag: set to 1 by SIGINT handler to stop a tracing loop
+ */
+extern volatile sig_atomic_t g_interrupt;
+
+/**
+ * @brief Install a SIGINT handler that sets g_interrupt instead of terminating
+ * Used by tracing commands so Ctrl+C stops the trace cleanly
+ * (avoids leaving the tracee at a single-step trap that would be delivered
+ *  as SIGTRAP on detach, killing the target with "trace trap (core dumped)")
+ */
+void install_sigint_stop(void);
+
+/**
+ * @brief waitpid that retries on EINTR (so a Ctrl+C during wait doesn't lose the tracee stop)
+ * @param pid Process ID
+ * @param status Output: wait status
+ * @return Same as waitpid
+ */
+pid_t waitpid_eintr(pid_t pid, int *status);
+
+/**
  * @brief Format bytes as human-readable size
  * @param bytes Number of bytes
  * @param buf Output buffer
@@ -489,6 +510,12 @@ void cmd_inject_shellcode(pid_t pid, const char *hex);
  * @param pid Process ID
  */
 void cmd_trace(pid_t pid);
+
+/**
+ * @brief Trace instructions (single-step and print each instruction)
+ * @param pid Process ID
+ */
+void cmd_itrace(pid_t pid);
 
 /**
  * @brief Change memory protection

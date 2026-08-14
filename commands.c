@@ -552,6 +552,91 @@ void cmd_trace(pid_t pid) {
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
 
+void cmd_itrace(pid_t pid) {
+    
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM)      { fprintf(stderr, "itrace: permission denied\n"); }
+        else if (errno == ESRCH) { fprintf(stderr, "itrace: no such process %d\n", pid); }
+        else DIE("PTRACE_ATTACH itrace");
+        return;
+    }
+    int st;
+    if (waitpid_eintr(pid, &st) == -1) {
+        perror("itrace: waitpid attach");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    /* Catch SIGINT so Ctrl+C stops the trace instead of killing us.
+       If we died while the tracee is stopped at a single-step SIGTRAP,
+       the kernel would deliver that SIGTRAP and kill the target with
+       "Trace/breakpoint trap (core dumped)". */
+    install_sigint_stop();
+
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Tracing instructions for PID %d. Press Ctrl+C to stop.\n" A_RESET, pid);
+    else printf("Tracing instructions for PID %d...\n", pid);
+
+    unsigned long long count = 0;
+    while (!g_interrupt) {
+        regs_t regs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+
+        /* Read up to 15 bytes (max x86 instruction length) at RIP.
+           No disassembler yet, so print the raw instruction bytes. */
+        unsigned char code[15];
+        size_t nbytes = 0;
+        for (size_t off = 0; off < sizeof(code); off += 8) {
+            errno = 0;
+            unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)(regs.rip + off), NULL);
+            if (w == (unsigned long)-1 && errno) break;
+            size_t n = (sizeof(code) - off < 8) ? sizeof(code) - off : 8;
+            memcpy(code + off, &w, n);
+            nbytes += n;
+        }
+
+        if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " 0x%016llx:", count, (unsigned long long)regs.rip);
+        else printf("[%06llu] 0x%016llx:", count, (unsigned long long)regs.rip);
+        for (size_t i = 0; i < nbytes; i++) printf(" %02x", code[i]);
+        printf("\n");
+        fflush(stdout);
+        count++;
+
+        if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) break;
+        if (waitpid_eintr(pid, &st) == -1) break;
+
+        if (WIFSTOPPED(st)) {
+            int sig = WSTOPSIG(st);
+            if (sig == SIGTRAP) continue;
+            if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
+            else printf("(stopped by signal %d)\n", sig);
+            if (sig == SIGSEGV) {
+                siginfo_t si;
+                if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0)
+                    fprintf(stderr, "  SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
+                break;
+            }
+            continue;
+        }
+        if (WIFEXITED(st)) {
+            printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
+            break;
+        }
+        if (WIFSIGNALED(st)) {
+            printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
+            break;
+        }
+    }
+
+    /* Detach with signal 0: the tracee resumes without any pending SIGTRAP. */
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+
+    if (g_interrupt) {
+        if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
+        else printf("Stopped tracing PID %d (detached; process continues).\n", pid);
+    }
+}
+
 void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
     int prot = parse_perms(perms_str);
     if (prot < 0) { fprintf(stderr, "mprotect: invalid perms '%s'\n", perms_str); return; }
