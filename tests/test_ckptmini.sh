@@ -18,9 +18,11 @@ TESTLOOP="$(cd "$(dirname "$0")" && pwd)/test_loop"
 TESTCALL="$(cd "$(dirname "$0")" && pwd)/test_call"
 TESTTHREAD="$(cd "$(dirname "$0")" && pwd)/test_thread"
 TESTLIB="$(cd "$(dirname "$0")" && pwd)/testlib.so"
+TESTSTATIC="$(cd "$(dirname "$0")" && pwd)/test_static"
 TESTLOOP_PID=""
 TESTCALL_PID=""
 TESTTHREAD_PID=""
+TESTSTATIC_PID=""
 
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
@@ -41,13 +43,18 @@ cleanup() {
     if [ -n "$TESTTHREAD_PID" ] && kill -0 "$TESTTHREAD_PID" 2>/dev/null; then
         kill -9 "$TESTTHREAD_PID" 2>/dev/null || true
     fi
+    if [ -n "$TESTSTATIC_PID" ] && kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
+        kill -9 "$TESTSTATIC_PID" 2>/dev/null || true
+    fi
     wait "$TESTLOOP_PID" 2>/dev/null || true
     wait "$TESTCALL_PID" 2>/dev/null || true
     wait "$TESTTHREAD_PID" 2>/dev/null || true
+    wait "$TESTSTATIC_PID" 2>/dev/null || true
     rm -rf "$TESTDIR"
     pkill -f "test_loop" 2>/dev/null || true
     pkill -f "test_call" 2>/dev/null || true
     pkill -f "test_thread" 2>/dev/null || true
+    pkill -f "test_static" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -695,6 +702,90 @@ kill -9 "$KILLER_PID" 2>/dev/null || true
 #if [ -n "$SPAWN_PID" ] && kill -0 "$SPAWN_PID" 2>/dev/null; then
 #    kill -9 "$SPAWN_PID" 2>/dev/null || true
 #fi
+
+#######################################
+# TEST 37: ftrace libc functions
+#######################################
+info "Test 37: ftrace libc functions"
+
+# Start a fresh test_call for this test (the long-lived one is cleaned up
+# after Test 33), so there is a live loop to trace.
+"$TESTCALL" > "$TESTDIR/test_call_for_ftrace.txt" 2>&1 &
+FTRACE_TARGET_PID=$!
+sleep 0.5
+
+if kill -0 "$FTRACE_TARGET_PID" 2>/dev/null; then
+    # Trace printf/sleep in the live test_call loop with return-value capture.
+    # The tracer is stopped with SIGINT (NOT timeout/SIGTERM, which would leak
+    # a SIGTRAP into the tracee and kill it).
+    $CKPTMINI ftrace "$FTRACE_TARGET_PID" printf sleep -r > "$TESTDIR/ftrace_libc.txt" 2>&1 &
+    FTRACE_PID=$!
+    sleep 2
+    kill -INT "$FTRACE_PID" 2>/dev/null || true
+    wait "$FTRACE_PID" 2>/dev/null
+
+    FTRACE_OUT=$(cat "$TESTDIR/ftrace_libc.txt")
+
+    if echo "$FTRACE_OUT" | grep -q 'printf(' && echo "$FTRACE_OUT" | grep -q 'sleep(1)'; then
+        pass "ftrace traces libc calls with parsed args"
+    else
+        fail "ftrace libc calls not traced (output: $FTRACE_OUT)"
+    fi
+
+    if echo "$FTRACE_OUT" | grep -q 'printf() -> 0x1f' && echo "$FTRACE_OUT" | grep -q 'sleep() -> 0x0'; then
+        pass "ftrace captures return values"
+    else
+        fail "ftrace return values not captured (output: $FTRACE_OUT)"
+    fi
+
+    if kill -0 "$FTRACE_TARGET_PID" 2>/dev/null; then
+        pass "target survives ftrace detach"
+    else
+        fail "target died after ftrace detach"
+    fi
+
+    kill -9 "$FTRACE_TARGET_PID" 2>/dev/null || true
+    wait "$FTRACE_TARGET_PID" 2>/dev/null || true
+else
+    warn "Could not start test_call for ftrace test"
+fi
+
+#######################################
+# TEST 38: ftrace static symbol resolution
+#######################################
+info "Test 38: ftrace static symbol resolution"
+
+"$TESTSTATIC" > "$TESTDIR/test_static_output.txt" 2>&1 &
+TESTSTATIC_PID=$!
+sleep 0.5
+
+if kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
+    # static_add is only in .symtab, so this exercises the elfsym fallback.
+    $CKPTMINI ftrace "$TESTSTATIC_PID" static_add -r > "$TESTDIR/ftrace_static.txt" 2>&1 &
+    FTRACE_PID=$!
+    sleep 2
+    kill -INT "$FTRACE_PID" 2>/dev/null || true
+    wait "$FTRACE_PID" 2>/dev/null
+
+    FTRACE_OUT=$(cat "$TESTDIR/ftrace_static.txt")
+
+    if echo "$FTRACE_OUT" | grep -q 'static_add(' && echo "$FTRACE_OUT" | grep -q 'static_add() -> 0x5'; then
+        pass "ftrace resolves and traces static symbol with return value"
+    else
+        fail "static symbol not traced (output: $FTRACE_OUT)"
+    fi
+
+    if kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
+        pass "static target survives ftrace detach"
+    else
+        fail "static target died after ftrace detach"
+    fi
+
+    kill -9 "$TESTSTATIC_PID" 2>/dev/null || true
+    wait "$TESTSTATIC_PID" 2>/dev/null || true
+else
+    warn "test_static not running, skipping ftrace static test"
+fi
 
 #######################################
 # SUMMARY

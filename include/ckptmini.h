@@ -416,6 +416,15 @@ symres_t elfsym_resolve(uint64_t addr);
 void elfsym_free(void);
 
 /**
+ * @brief Look up the runtime address of a symbol by name
+ * Searches all loaded modules (both .symtab and .dynsym, so static symbols
+ * that dlsym cannot see resolve too).
+ * @param name Symbol name
+ * @return Runtime address in the target, 0 if not found
+ */
+uint64_t elfsym_lookup(const char *name);
+
+/**
  * @brief Write bytes to live process memory
  * Uses process_vm_writev first, falls back to /proc/PID/mem
  * @param pid Process ID
@@ -622,7 +631,7 @@ uintptr_t cmd_call(pid_t pid, uint64_t addr, int argc, char **argv, bool detach)
  * @param ret_val Output: return value
  * @return Function return value
  */
-uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool detach, uintptr_t *ret_val);
+uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool detach, uintptr_t *ret_val, bool quiet);
 
 /**
  * @brief Load shared library into process
@@ -647,9 +656,10 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot);
  * @brief Resolve symbol address in remote process using dlsym
  * @param pid Process ID
  * @param symbol_name Symbol name to resolve
+ * @param quiet Suppress the "Resolved ..."/"dlsym failed" messages
  * @return Resolved address, 0 on failure
  */
-uint64_t cmd_resolve(pid_t pid, const char *symbol_name);
+uint64_t cmd_resolve(pid_t pid, const char *symbol_name, bool quiet);
 
 /**
  * @brief Spawn process in paused state

@@ -216,7 +216,7 @@ int main(int argc, char **argv) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)atoi(argv[2]);
         const char *symbol = argv[3];
-        uint64_t addr = cmd_resolve(pid, symbol);
+        uint64_t addr = cmd_resolve(pid, symbol, false);
         return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
