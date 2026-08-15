@@ -1,5 +1,6 @@
 #include "ckptmini.h"
 #include "parasite.h"
+#include <capstone/capstone.h>
 #include <ctype.h>
 
 static void print_perms_colored(const char *perms, bool tty) {
@@ -553,7 +554,19 @@ void cmd_trace(pid_t pid) {
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
 
-void cmd_itrace(pid_t pid) {
+/* ---------------- instruction (single-step) tracing ---------------- */
+
+/* Pad the raw-byte column (3 chars per byte) so mnemonics align. */
+static void pad_bytes_col(size_t nbytes) {
+    size_t w = nbytes * 3;
+    for (; w < 46; w++) putchar(' ');
+}
+
+static bool disas_open(csh *handle) {
+    return cs_open(CS_ARCH_X86, CS_MODE_64, handle) == CS_ERR_OK;
+}
+
+void cmd_itrace(pid_t pid, bool disasm) {
     
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "itrace: permission denied\n"); }
@@ -577,27 +590,53 @@ void cmd_itrace(pid_t pid) {
     if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Tracing instructions for PID %d. Press Ctrl+C to stop.\n" A_RESET, pid);
     else printf("Tracing instructions for PID %d...\n", pid);
 
+    csh handle;
+    if (disasm && !disas_open(&handle)) {
+        fprintf(stderr, "itrace: capstone init failed\n");
+        disasm = false;
+    }
+
     unsigned long long count = 0;
     while (!g_interrupt) {
         regs_t regs;
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
 
-        /* Read up to 15 bytes (max x86 instruction length) at RIP.
-           No disassembler yet, so print the raw instruction bytes. */
+        /* Read bytes at RIP: -d mode needs up to 15 bytes (max x86
+           instruction length); normal mode reads a single 8-byte word. */
         unsigned char code[15];
         size_t nbytes = 0;
-        for (size_t off = 0; off < sizeof(code); off += 8) {
+        size_t cap = disasm ? sizeof(code) : 8;
+        for (size_t off = 0; off < cap; off += 8) {
             errno = 0;
             unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)(regs.rip + off), NULL);
             if (w == (unsigned long)-1 && errno) break;
-            size_t n = (sizeof(code) - off < 8) ? sizeof(code) - off : 8;
+            size_t n = (cap - off < 8) ? cap - off : 8;
             memcpy(code + off, &w, n);
             nbytes += n;
         }
 
+        /* Decode first: in -d mode only the instruction's own bytes are shown,
+           not the lookahead that will be executed on later steps. */
+        cs_insn *insn = NULL;
+        size_t nins = 0;
+        size_t shown = nbytes;
+        if (disasm) {
+            nins = cs_disasm(handle, code, nbytes, regs.rip, 1, &insn);
+            shown = nins > 0 ? insn[0].size : 0;
+        }
+
         if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " 0x%016llx:", count, (unsigned long long)regs.rip);
         else printf("[%06llu] 0x%016llx:", count, (unsigned long long)regs.rip);
-        for (size_t i = 0; i < nbytes; i++) printf(" %02x", code[i]);
+        for (size_t i = 0; i < shown; i++) printf(" %02x", code[i]);
+        if (disasm) {
+            pad_bytes_col(shown);
+            if (nins > 0) {
+                printf("  %s %s", insn[0].mnemonic, insn[0].op_str);
+                cs_free(insn, nins);
+            } else {
+                printf("  <invalid>");
+            }
+        }
         printf("\n");
         fflush(stdout);
         count++;
@@ -636,6 +675,60 @@ void cmd_itrace(pid_t pid) {
         if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
         else printf("Stopped tracing PID %d (detached; process continues).\n", pid);
     }
+
+    if (disasm) cs_close(&handle);
+}
+
+void cmd_disas(pid_t pid, uint64_t addr, size_t len) {
+    if (len == 0) { fprintf(stderr, "disas: len must be > 0\n"); return; }
+    unsigned char *buf = (unsigned char*)malloc(len);
+    if (!buf) DIE("malloc disas");
+    if (!read_bytes_from_pid(pid, (uintptr_t)addr, buf, len)) {
+        if (g_is_tty) printf(A_BOLD A_RED);
+        printf("  %s Failed to read %zu bytes at 0x%016llx from PID %d\n", S_ERR, len, (unsigned long long)addr, pid);
+        if (g_is_tty) printf(A_RESET);
+        free(buf);
+        return;
+    }
+
+    csh handle;
+    if (!disas_open(&handle)) {
+        fprintf(stderr, "disas: capstone init failed\n");
+        free(buf);
+        return;
+    }
+
+    if (g_is_tty) printf(A_BOLD A_CYAN);
+    printf("  Disassembling %zu bytes at 0x%016llx (PID %d)\n", len, (unsigned long long)addr, pid);
+    if (g_is_tty) printf(A_RESET);
+
+    size_t off = 0;
+    while (off < len) {
+        cs_insn *insn = NULL;
+        size_t count = cs_disasm(handle, buf + off, len - off, addr + off, 1, &insn);
+        if (count == 0) {
+            if (g_is_tty) printf(A_DIM);
+            printf("  0x%016llx:  %02x", (unsigned long long)(addr + off), buf[off]);
+            pad_bytes_col(1);
+            if (g_is_tty) printf(A_RESET);
+            printf("<invalid>\n");
+            off++;
+            continue;
+        }
+        printf("  0x%016llx:  ", (unsigned long long)(addr + off));
+        for (size_t i = 0; i < insn[0].size; i++) printf("%02x ", buf[off + i]);
+        pad_bytes_col(insn[0].size);
+        if (g_is_tty) printf(A_GREEN);
+        printf("%s", insn[0].mnemonic);
+        if (g_is_tty) printf(A_RESET);
+        if (insn[0].op_str[0]) printf(" %s", insn[0].op_str);
+        printf("\n");
+        off += insn[0].size;
+        cs_free(insn, count);
+    }
+
+    cs_close(&handle);
+    free(buf);
 }
 
 /* ---------------- function (symbol) tracing ---------------- */

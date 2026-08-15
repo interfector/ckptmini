@@ -24,7 +24,7 @@ HIJACKLIB_SRC = tests/hijacklib.c
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS) $(PARASITE_OBJ)
-	$(CC) $(OBJECTS) $(PARASITE_OBJ) -o $(TARGET)
+	$(CC) $(OBJECTS) $(PARASITE_OBJ) -o $(TARGET) -lcapstone
 
 $(PARASITE_OBJ): $(PARASITE_BIN)
 	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $(PARASITE_BIN) $(PARASITE_OBJ)
