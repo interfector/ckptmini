@@ -436,6 +436,7 @@ void usage(const char *prog) {
     fprintf(stderr, "  %-24s %s\n", "itrace <pid> [-d] [-s]", "Single-step instructions (-d disasm, -s symbols)");
     fprintf(stderr, "  %-24s %s\n", "calltrace <pid> [-s]", "Log call/jmp/ret flow (call graph)");
     fprintf(stderr, "  %-24s %s\n", "ftrace <pid> <sym> [sym...] [-r]", "Trace calls to libc functions (-r capture return values)");
+    fprintf(stderr, "  %-24s %s\n", "finish <pid>", "Run until the current function returns (step-out)");
     fprintf(stderr, "  %-24s %s\n", "disas <pid> <addr> <len> [-s]", "Disassemble memory with Capstone (-s symbols)");
     
     fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Breakpoints:");

@@ -19,10 +19,12 @@ TESTCALL="$(cd "$(dirname "$0")" && pwd)/test_call"
 TESTTHREAD="$(cd "$(dirname "$0")" && pwd)/test_thread"
 TESTLIB="$(cd "$(dirname "$0")" && pwd)/testlib.so"
 TESTSTATIC="$(cd "$(dirname "$0")" && pwd)/test_static"
+TESTFINISH="$(cd "$(dirname "$0")" && pwd)/test_finish"
 TESTLOOP_PID=""
 TESTCALL_PID=""
 TESTTHREAD_PID=""
 TESTSTATIC_PID=""
+TESTFINISH_PID=""
 
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
@@ -46,15 +48,20 @@ cleanup() {
     if [ -n "$TESTSTATIC_PID" ] && kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
         kill -9 "$TESTSTATIC_PID" 2>/dev/null || true
     fi
+    if [ -n "$TESTFINISH_PID" ] && kill -0 "$TESTFINISH_PID" 2>/dev/null; then
+        kill -9 "$TESTFINISH_PID" 2>/dev/null || true
+    fi
     wait "$TESTLOOP_PID" 2>/dev/null || true
     wait "$TESTCALL_PID" 2>/dev/null || true
     wait "$TESTTHREAD_PID" 2>/dev/null || true
     wait "$TESTSTATIC_PID" 2>/dev/null || true
+    wait "$TESTFINISH_PID" 2>/dev/null || true
     rm -rf "$TESTDIR"
     pkill -f "test_loop" 2>/dev/null || true
     pkill -f "test_call" 2>/dev/null || true
     pkill -f "test_thread" 2>/dev/null || true
     pkill -f "test_static" 2>/dev/null || true
+    pkill -f "test_finish" 2>/dev/null || true
 }
 
 trap cleanup EXIT
@@ -785,6 +792,45 @@ if kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
     wait "$TESTSTATIC_PID" 2>/dev/null || true
 else
     warn "test_static not running, skipping ftrace static test"
+fi
+
+#######################################
+# TEST 39: finish (step-out)
+# Run until the current function returns, using the return-address
+# breakpoint machinery, and report the value left in rax.
+#######################################
+info "Test 39: finish command"
+
+"$TESTFINISH" > "$TESTDIR/test_finish_output.txt" 2>&1 &
+TESTFINISH_PID=$!
+
+# Wait for the marker that spinwork prints at its entry, then attach: the
+# busy loop keeps RIP inside spinwork (no libc calls) for ~seconds.
+for i in $(seq 1 100); do
+    grep -q "spinwork started" "$TESTDIR/test_finish_output.txt" 2>/dev/null && break
+    sleep 0.05
+done
+
+if kill -0 "$TESTFINISH_PID" 2>/dev/null; then
+    FINISH_OUT=$($CKPTMINI finish "$TESTFINISH_PID" 2>&1)
+    echo "$FINISH_OUT"
+
+    if echo "$FINISH_OUT" | grep -q 'spinwork() -> 0x2a'; then
+        pass "finish runs until the current function returns and captures rax"
+    else
+        fail "finish did not capture spinwork return value (output: $FINISH_OUT)"
+    fi
+
+    if kill -0 "$TESTFINISH_PID" 2>/dev/null; then
+        pass "finish detaches and target survives"
+    else
+        fail "target died after finish"
+    fi
+
+    kill -9 "$TESTFINISH_PID" 2>/dev/null || true
+    wait "$TESTFINISH_PID" 2>/dev/null || true
+else
+    warn "Could not start test_finish"
 fi
 
 #######################################

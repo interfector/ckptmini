@@ -1580,6 +1580,168 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     }
 }
 
+/* Finish / step-out: run until the current function returns.
+   Reuses the return-address breakpoint machinery from ftrace's -r capture:
+   a single int3 is armed at the current frame's return address (read from
+   [rbp+8]) and, when it fires, the value in rax is printed and the process is
+   detached just past the return, inside the caller. Ctrl+C aborts and detaches
+   cleanly (never SIGTERM, which would leak the armed int3 into the tracee). */
+void cmd_finish(pid_t pid) {
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM)      { fprintf(stderr, "finish: permission denied\n"); }
+        else if (errno == ESRCH) { fprintf(stderr, "finish: no such process %d\n", pid); }
+        else DIE("PTRACE_ATTACH finish");
+        return;
+    }
+    int st;
+    if (waitpid_eintr(pid, &st) == -1) {
+        perror("finish: waitpid attach");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    /* Ctrl+C aborts the wait instead of killing us while the tracee is
+       stopped at the return breakpoint (which would leak SIGTRAP on detach). */
+    install_sigint_stop();
+
+    regs_t regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
+        perror("finish: PTRACE_GETREGS");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    /* The current frame's return address sits at [rbp+8] once the prologue set
+       up the frame pointer (push rbp; mov rbp, rsp). */
+    if (regs.rbp == 0) {
+        fprintf(stderr, "finish: rbp is 0 (no frame pointer); cannot find return address\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    uint64_t ret_addr = 0;
+    if (!read_bytes_from_pid(pid, regs.rbp + 8, &ret_addr, 8)) {
+        fprintf(stderr, "finish: could not read return address at [rbp+8] (0x%llx)\n",
+                (unsigned long long)(regs.rbp + 8));
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    bool have_syms = (elfsym_init(pid) == 0);
+    symres_t cur = { 0 };
+    char fname[128] = "<unknown>";
+    if (have_syms) {
+        cur = elfsym_resolve(regs.rip);
+        if (cur.found) snprintf(fname, sizeof(fname), "%s", cur.name);
+    }
+
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Finish" A_RESET);
+    else printf("Finish");
+    if (cur.found && cur.delta)
+        printf(": running %s+0x%llx", fname, (unsigned long long)cur.delta);
+    else
+        printf(": running %s", fname);
+    printf(" until it returns (ret addr 0x%016llx). Ctrl+C to abort.\n",
+           (unsigned long long)ret_addr);
+
+    /* Arm a single return-address breakpoint through the same machinery ftrace's
+       -r uses: one pending return, reported via g_fbps[0].name. */
+    g_nfbps = 1;
+    g_nrbps = 0;
+    g_retdepth = 0;
+    g_retval_enabled = false;
+    g_fbps[0].addr = 0;
+    g_fbps[0].armed = false;
+    snprintf(g_fbps[0].name, sizeof(g_fbps[0].name), "%s", fname);
+    arm_return_bp(pid, ret_addr, 0, 1);
+    if (g_nrbps == 0 || !g_rbps[0].armed) {
+        fprintf(stderr, "finish: could not arm return-address breakpoint at 0x%llx\n",
+                (unsigned long long)ret_addr);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    int deliver = 0;
+    bool running = false;
+    while (!g_interrupt) {
+        if (ptrace(PTRACE_CONT, pid, NULL, (void*)(long)deliver) == -1) break;
+        deliver = 0;
+        running = true;
+        pid_t r;
+        do {
+            r = waitpid(pid, &st, __WALL);
+        } while (r == -1 && errno == EINTR && !g_interrupt);
+        if (r == -1) break;   /* Ctrl+C while the tracee is running, or error */
+        running = false;
+
+        if (WIFEXITED(st)) {
+            printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
+            break;
+        }
+        if (WIFSIGNALED(st)) {
+            printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
+            break;
+        }
+        if (!WIFSTOPPED(st)) continue;
+
+        int sig = WSTOPSIG(st);
+        if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+
+        if (sig != SIGTRAP) {
+            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
+            else printf("(stopped by signal %d)\n", sig);
+            deliver = sig;   /* let the target's handler see it */
+            continue;
+        }
+
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+        uint64_t bp = regs.rip - 1;
+
+        int ridx = -1;
+        for (int i = 0; i < g_nrbps; i++) {
+            if (g_rbps[i].armed && g_rbps[i].addr == bp) { ridx = i; break; }
+        }
+        if (ridx >= 0) {
+            /* Function returned: print the value in rax, then restore/single-step. */
+            (void)handle_rbp_hit(pid, ridx);
+            break;
+        }
+
+        /* Not one of ours: deliver the stray SIGTRAP. */
+        if (g_is_tty) printf(A_DIM "  (unexpected SIGTRAP at 0x%llx, delivered)\n" A_RESET,
+                             (unsigned long long)regs.rip);
+        else printf("(unexpected SIGTRAP at 0x%llx, delivered)\n", (unsigned long long)regs.rip);
+        deliver = SIGTRAP;
+    }
+
+    /* On Ctrl+C the tracee may still be running with the return breakpoint
+       armed: stop it so the byte can be restored before detaching. */
+    if (running) {
+        (void)kill(pid, SIGSTOP);
+        pid_t r;
+        do { r = waitpid(pid, &st, __WALL); } while (r == -1 && errno == EINTR);
+    }
+
+    /* Restore any still-armed return breakpoint and detach cleanly. */
+    for (int i = 0; i < g_nrbps; i++) {
+        if (!g_rbps[i].armed) continue;
+        errno = 0;
+        unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)g_rbps[i].addr, NULL);
+        if (w == (unsigned long)-1 && errno) continue;
+        unsigned long nw = (w & ~0xffUL) | (unsigned long)g_rbps[i].orig_byte;
+        ptrace(PTRACE_POKETEXT, pid, (void*)g_rbps[i].addr, (void*)nw);
+        g_rbps[i].armed = false;
+    }
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+
+    if (g_interrupt) {
+        if (g_is_tty) printf(A_GREEN "  ★ Aborted finish on PID %d (detached; process continues).\n" A_RESET, pid);
+        else printf("Aborted finish on PID %d (detached; process continues).\n", pid);
+    } else {
+        if (g_is_tty) printf(A_GREEN "  ★ Finished %s in PID %d (detached; process continues).\n" A_RESET, fname, pid);
+        else printf("Finished %s in PID %d (detached; process continues).\n", fname, pid);
+    }
+}
+
 void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
     int prot = parse_perms(perms_str);
     if (prot < 0) { fprintf(stderr, "mprotect: invalid perms '%s'\n", perms_str); return; }

@@ -9,8 +9,8 @@ PARASITE = parasite.elf
 PARASITE_BIN = parasite.bin
 PARASITE_OBJ = parasite_blob.o
 
-TEST_TARGETS = tests/test_loop tests/test_call tests/test_thread tests/test_collider tests/test_static
-TEST_SOURCES = tests/test_loop.c tests/test_call.c tests/test_thread.c tests/test_collider.c tests/test_static.c
+TEST_TARGETS = tests/test_loop tests/test_call tests/test_thread tests/test_collider tests/test_static tests/test_finish
+TEST_SOURCES = tests/test_loop.c tests/test_call.c tests/test_thread.c tests/test_collider.c tests/test_static.c tests/test_finish.c
 TEST_OBJS = $(TEST_SOURCES:.c=.o)
 
 TESTLIB = testlib.so
@@ -40,7 +40,7 @@ parasite: $(PARASITE_BIN)
 
 test: $(TEST_TARGETS) $(TESTLIB) $(HIJACKLIB)
 
-tests: all test_loop test_call test_thread test_static $(TESTLIB) $(HIJACKLIB)
+tests: all test_loop test_call test_thread test_static test_finish $(TESTLIB) $(HIJACKLIB)
 	./tests/test_ckptmini.sh
 
 $(TESTLIB): $(TESTLIB_SRC)
@@ -63,6 +63,9 @@ test_collider: tests/test_collider.o
 
 test_static: tests/test_static.o
 	$(CC) $< -o tests/test_static
+
+test_finish: tests/test_finish.o
+	$(CC) $< -o tests/test_finish
 
 tests/%.o: tests/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
