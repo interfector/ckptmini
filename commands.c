@@ -566,7 +566,27 @@ static bool disas_open(csh *handle) {
     return cs_open(CS_ARCH_X86, CS_MODE_64, handle) == CS_ERR_OK;
 }
 
-void cmd_itrace(pid_t pid, bool disasm) {
+/* Tracks the last printed symbol so a header is only emitted on change. */
+typedef struct {
+    uint64_t last_sym_start;
+    bool has_last;
+} symstate_t;
+
+/* Print a "sym+0xN:" header when the resolved symbol changes. */
+static void sym_header(symstate_t *st, uint64_t addr) {
+    symres_t r = elfsym_resolve(addr);
+    if (!r.found) return;
+    uint64_t start = addr - r.delta;
+    if (st->has_last && st->last_sym_start == start) return;
+    st->has_last = true;
+    st->last_sym_start = start;
+    if (g_is_tty) printf(A_DIM A_BOLD);
+    if (r.delta) printf("%s+0x%llx:\n", r.name, (unsigned long long)r.delta);
+    else printf("%s:\n", r.name);
+    if (g_is_tty) printf(A_RESET);
+}
+
+void cmd_itrace(pid_t pid, bool disasm, bool syms) {
     
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "itrace: permission denied\n"); }
@@ -595,11 +615,18 @@ void cmd_itrace(pid_t pid, bool disasm) {
         fprintf(stderr, "itrace: capstone init failed\n");
         disasm = false;
     }
+    if (syms && elfsym_init(pid) != 0) {
+        fprintf(stderr, "itrace: could not load symbols\n");
+        syms = false;
+    }
 
+    symstate_t symst = { 0 };
     unsigned long long count = 0;
     while (!g_interrupt) {
         regs_t regs;
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+
+        if (syms) sym_header(&symst, regs.rip);
 
         /* Read bytes at RIP: -d mode needs up to 15 bytes (max x86
            instruction length); normal mode reads a single 8-byte word. */
@@ -677,9 +704,10 @@ void cmd_itrace(pid_t pid, bool disasm) {
     }
 
     if (disasm) cs_close(&handle);
+    if (syms) elfsym_free();
 }
 
-void cmd_disas(pid_t pid, uint64_t addr, size_t len) {
+void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms) {
     if (len == 0) { fprintf(stderr, "disas: len must be > 0\n"); return; }
     unsigned char *buf = (unsigned char*)malloc(len);
     if (!buf) DIE("malloc disas");
@@ -697,13 +725,19 @@ void cmd_disas(pid_t pid, uint64_t addr, size_t len) {
         free(buf);
         return;
     }
+    if (syms && elfsym_init(pid) != 0) {
+        fprintf(stderr, "disas: could not load symbols\n");
+        syms = false;
+    }
 
     if (g_is_tty) printf(A_BOLD A_CYAN);
     printf("  Disassembling %zu bytes at 0x%016llx (PID %d)\n", len, (unsigned long long)addr, pid);
     if (g_is_tty) printf(A_RESET);
 
+    symstate_t symst = { 0 };
     size_t off = 0;
     while (off < len) {
+        if (syms) sym_header(&symst, addr + off);
         cs_insn *insn = NULL;
         size_t count = cs_disasm(handle, buf + off, len - off, addr + off, 1, &insn);
         if (count == 0) {
@@ -728,6 +762,7 @@ void cmd_disas(pid_t pid, uint64_t addr, size_t len) {
     }
 
     cs_close(&handle);
+    if (syms) elfsym_free();
     free(buf);
 }
 

@@ -82,23 +82,32 @@ int main(int argc, char **argv) {
     }
 
     if (!strcmp(argv[1], "itrace")) {
-        if (argc < 3 || argc > 4) { usage(argv[0]); return EXIT_FAILURE; }
-        bool disasm = (argc == 4);
-        if (disasm && strcmp(argv[3], "-d") && strcmp(argv[3], "--disas")) {
-            usage(argv[0]);
-            return EXIT_FAILURE;
+        if (argc < 3) { usage(argv[0]); return EXIT_FAILURE; }
+        bool disasm = false, syms = false;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--disas")) disasm = true;
+            else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--symbols")) syms = true;
+            else { usage(argv[0]); return EXIT_FAILURE; }
         }
-        cmd_itrace((pid_t)atoi(argv[2]), disasm);
+        cmd_itrace((pid_t)atoi(argv[2]), disasm, syms);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "disas")) {
-        if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
+        if (argc < 5 || argc > 6) { usage(argv[0]); return EXIT_FAILURE; }
+        bool syms = false;
+        if (argc == 6) {
+            if (strcmp(argv[5], "-s") && strcmp(argv[5], "--symbols")) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            syms = true;
+        }
         pid_t pid = (pid_t)atoi(argv[2]);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         size_t len = (size_t)strtoul(argv[4], NULL, 10);
         if (len == 0) { fprintf(stderr, "disas: len must be > 0\n"); return EXIT_FAILURE; }
-        cmd_disas(pid, addr, len);
+        cmd_disas(pid, addr, len, syms);
         return EXIT_SUCCESS;
     }
 

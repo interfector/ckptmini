@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -I./include
 
 TARGET = ckptmini
-SOURCES = pmparser.c utils.c core.c commands.c main.c
+SOURCES = pmparser.c utils.c core.c commands.c elfsym.c main.c
 OBJECTS = $(SOURCES:.c=.o)
 
 PARASITE = parasite.elf
