@@ -586,6 +586,13 @@ static void sym_header(symstate_t *st, uint64_t addr) {
     if (g_is_tty) printf(A_RESET);
 }
 
+/* Annotate a ret instruction with the value in rax (the value being returned). */
+static void print_retval(uint64_t rax) {
+    if (g_is_tty) printf(A_DIM);
+    printf("    rax=0x%llx", (unsigned long long)rax);
+    if (g_is_tty) printf(A_RESET);
+}
+
 void cmd_itrace(pid_t pid, bool disasm, bool syms) {
     
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
@@ -659,6 +666,7 @@ void cmd_itrace(pid_t pid, bool disasm, bool syms) {
             pad_bytes_col(shown);
             if (nins > 0) {
                 printf("  %s %s", insn[0].mnemonic, insn[0].op_str);
+                if (!strncmp(insn[0].mnemonic, "ret", 3)) print_retval(regs.rax);
                 cs_free(insn, nins);
             } else {
                 printf("  <invalid>");
@@ -769,7 +777,7 @@ void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms) {
 /* ---------------- call/jmp/ret flow tracing ---------------- */
 
 static void print_calltrace_line(unsigned long long count, int depth,
-                                 const cs_insn *insn, uint64_t rip, bool syms) {
+                                 const cs_insn *insn, uint64_t rip, uint64_t rax, bool syms) {
     if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " depth=%d  ", count, depth);
     else printf("[%06llu] depth=%d  ", count, depth);
 
@@ -791,8 +799,12 @@ static void print_calltrace_line(unsigned long long count, int depth,
     printf("%s %s", insn->mnemonic, insn->op_str);
     if (g_is_tty) printf(A_RESET);
 
+    /* For a ret, rax holds the value being returned. */
+    if (!strncmp(insn->mnemonic, "ret", 3)) print_retval(rax);
+
     /* For direct calls/jumps, annotate the resolved callee with -s. */
-    if (syms && insn->detail && insn->detail->x86.op_count > 0) {
+    if (syms && insn->detail && insn->detail->x86.op_count > 0 &&
+        (!strncmp(insn->mnemonic, "call", 4) || !strncmp(insn->mnemonic, "jmp", 3))) {
         const cs_x86_op *op = &insn->detail->x86.operands[0];
         if (op->type == X86_OP_IMM) {
             symres_t t = elfsym_resolve((uint64_t)op->imm);
@@ -861,7 +873,7 @@ void cmd_calltrace(pid_t pid, bool syms) {
         if (nins > 0) {
             const char *m = insn[0].mnemonic;
             if (!strncmp(m, "call", 4) || !strncmp(m, "ret", 3) || !strncmp(m, "jmp", 3)) {
-                print_calltrace_line(count, depth, &insn[0], regs.rip, syms);
+                print_calltrace_line(count, depth, &insn[0], regs.rip, regs.rax, syms);
                 if (!strncmp(m, "call", 4)) depth++;
                 else if (!strncmp(m, "ret", 3) && depth > 0) depth--;
                 count++;
@@ -997,6 +1009,28 @@ typedef struct {
 
 static fbp_t g_fbps[128];
 static int g_nfbps = 0;
+
+/* Return-value capture (-r): breakpoint armed at a traced function's return
+   address, plus a LIFO stack of pending returns used to correlate each
+   return with its call. Returns are strictly LIFO, so the stack top is
+   always the next return to fire. */
+typedef struct {
+    uint64_t addr;
+    unsigned char orig_byte;
+    bool armed;
+} rbp_t;
+
+typedef struct {
+    uint64_t addr;                  /* return address (instruction after call) */
+    int fbp_idx;                    /* which traced function this call belongs to */
+    unsigned long long call_no;
+} retentry_t;
+
+static rbp_t g_rbps[256];
+static int g_nrbps = 0;
+static retentry_t g_retstack[1024];
+static int g_retdepth = 0;
+static bool g_retval_enabled = false;
 
 /* Get the n-th argument (0-based) of the current call.
    Args 0..5 live in GP registers, args 6+ on the stack above the return address. */
@@ -1188,6 +1222,128 @@ static void print_fmt_variadic(pid_t pid, const regs_t *regs, uint64_t fmt_addr,
     }
 }
 
+/* Arm an int3 breakpoint at a traced function's return address and record the
+   pending return so we can correlate the later hit with its call. ret_addr was
+   captured from the stack at function entry (before the prologue ran). */
+static void arm_return_bp(pid_t pid, uint64_t ret_addr, int fbp_idx, unsigned long long call_no) {
+    if (ret_addr == 0) return;
+
+    int ridx = -1;
+    for (int i = 0; i < g_nrbps; i++)
+        if (g_rbps[i].addr == ret_addr) { ridx = i; break; }
+    if (ridx < 0) {
+        if (g_nrbps >= (int)(sizeof(g_rbps)/sizeof(g_rbps[0]))) return;   /* table full */
+        ridx = g_nrbps++;
+        g_rbps[ridx].addr = ret_addr;
+        g_rbps[ridx].orig_byte = 0;
+        g_rbps[ridx].armed = false;
+    }
+    rbp_t *r = &g_rbps[ridx];
+
+    if (!r->armed) {
+        errno = 0;
+        unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)ret_addr, NULL);
+        if (w == (unsigned long)-1 && errno) return;
+        r->orig_byte = (unsigned char)(w & 0xff);
+        if (ptrace(PTRACE_POKETEXT, pid, (void*)ret_addr, (void*)((w & ~0xffUL) | 0xccUL)) == -1) return;
+        r->armed = true;
+    }
+
+    if (g_retdepth < (int)(sizeof(g_retstack)/sizeof(g_retstack[0]))) {
+        g_retstack[g_retdepth].addr = ret_addr;
+        g_retstack[g_retdepth].fbp_idx = fbp_idx;
+        g_retstack[g_retdepth].call_no = call_no;
+        g_retdepth++;
+    }
+}
+
+/* Handle a return-address breakpoint hit: pop the matching pending return,
+   print the value in rax, then restore-single-step-rearm like handle_fbp_hit.
+   Registers keep the post-return state; only RIP is rewound past the int3. */
+static int handle_rbp_hit(pid_t pid, int ridx) {
+    rbp_t *r = &g_rbps[ridx];
+
+    regs_t regs;
+    if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) return 0;
+    uint64_t rax = regs.rax;
+
+    int fbp_idx = 0;
+    unsigned long long call_no = 0;
+    if (g_retdepth > 0 && g_retstack[g_retdepth - 1].addr == r->addr) {
+        g_retdepth--;
+        fbp_idx = g_retstack[g_retdepth].fbp_idx;
+        call_no = g_retstack[g_retdepth].call_no;
+    } else {
+        for (int i = g_retdepth - 1; i >= 0; i--) {
+            if (g_retstack[i].addr == r->addr) {
+                fbp_idx = g_retstack[i].fbp_idx;
+                call_no = g_retstack[i].call_no;
+                memmove(&g_retstack[i], &g_retstack[i + 1],
+                        (size_t)(g_retdepth - i - 1) * sizeof(g_retstack[0]));
+                g_retdepth--;
+                break;
+            }
+        }
+    }
+
+    const char *name = g_fbps[fbp_idx].name;
+    symres_t sr = elfsym_resolve(rax);
+    if (g_is_tty) {
+        printf(A_CYAN "[%06llu]" A_RESET " %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
+        if (sr.found) printf(A_DIM "  (%s+0x%llx)" A_RESET, sr.name, (unsigned long long)sr.delta);
+    } else {
+        printf("[%06llu] %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
+        if (sr.found) printf("  (%s+0x%llx)", sr.name, (unsigned long long)sr.delta);
+    }
+    printf("\n");
+    fflush(stdout);
+
+    /* Restore the original byte and re-point RIP at the return site: the int3
+       advanced RIP past the breakpoint byte, so step back to re-execute the
+       real instruction. Other registers already hold the post-return state. */
+    uint64_t addr = r->addr;
+    regs.rip -= 1;
+    if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) return 0;
+
+    errno = 0;
+    unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)addr, NULL);
+    if (!(w == (unsigned long)-1 && errno)) {
+        unsigned long nw = (w & ~0xffUL) | (unsigned long)r->orig_byte;
+        ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)nw);
+    }
+
+    if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) return 0;
+
+    int st;
+    int deliver = 0;
+    while (1) {
+        if (waitpid_eintr(pid, &st) == -1) break;
+        if (!WIFSTOPPED(st)) break;
+        int sig = WSTOPSIG(st);
+        if (sig == SIGTRAP) break;                      /* done stepping */
+        if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+        deliver = sig;                                  /* interrupted by a real signal */
+        break;
+    }
+
+    /* Re-arm only while another pending return still targets this address. */
+    bool still_pending = false;
+    for (int i = 0; i < g_retdepth; i++)
+        if (g_retstack[i].addr == r->addr) { still_pending = true; break; }
+    if (still_pending) {
+        errno = 0;
+        w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)addr, NULL);
+        if (!(w == (unsigned long)-1 && errno)) {
+            unsigned long nw = (w & ~0xffUL) | 0xccUL;
+            ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)nw);
+        }
+        r->armed = true;
+    } else {
+        r->armed = false;
+    }
+    return deliver;
+}
+
 /* Handle a breakpoint hit at function g_fbps[idx]: print args, then do the
    restore-single-step-rearm dance. Returns a signal to deliver on the next
    PTRACE_CONT (0 = none). */
@@ -1197,6 +1353,11 @@ static int handle_fbp_hit(pid_t pid, int idx, unsigned long long call_no) {
     regs_t regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) return 0;
     regs.rip -= 1;  /* point back at the function entry */
+
+    /* Capture the return address now: rsp still points at it here, but the
+       single-step below runs the prologue (e.g. push rbp) and moves rsp. */
+    uint64_t ret_addr = 0;
+    if (g_retval_enabled) (void)read_bytes_from_pid(pid, regs.rsp, &ret_addr, 8);
 
     if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " %s(", call_no, b->name);
     else printf("[%06llu] %s(", call_no, b->name);
@@ -1257,11 +1418,16 @@ static int handle_fbp_hit(pid_t pid, int idx, unsigned long long call_no) {
         ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)nw);
     }
     b->armed = true;
+
+    if (g_retval_enabled) arm_return_bp(pid, ret_addr, idx, call_no);
     return deliver;
 }
 
-void cmd_ftrace(pid_t pid, int nnames, char **names) {
+void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     g_nfbps = 0;
+    g_nrbps = 0;
+    g_retdepth = 0;
+    g_retval_enabled = retval;
 
     /* Resolve each requested symbol (reuses the existing dlsym machinery). */
     for (int i = 0; i < nnames && g_nfbps < (int)(sizeof(g_fbps)/sizeof(g_fbps[0])); i++) {
@@ -1346,6 +1512,18 @@ void cmd_ftrace(pid_t pid, int nnames, char **names) {
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
         uint64_t bp = regs.rip - 1;
 
+        /* Return-address breakpoints first: a pending return is more specific
+           than a function entry at the same address. */
+        int ridx = -1;
+        for (int i = 0; i < g_nrbps; i++) {
+            if (g_rbps[i].armed && g_rbps[i].addr == bp) { ridx = i; break; }
+        }
+        if (ridx >= 0) {
+            deliver = handle_rbp_hit(pid, ridx);
+            if (g_interrupt) break;   /* Ctrl+C landed during the single-step dance */
+            continue;
+        }
+
         int idx = -1;
         for (int i = 0; i < g_nfbps; i++) {
             if (g_fbps[i].addr == bp) { idx = i; break; }
@@ -1374,6 +1552,16 @@ void cmd_ftrace(pid_t pid, int nnames, char **names) {
         unsigned long nw = (w & ~0xffUL) | (unsigned long)g_fbps[i].orig_byte;
         ptrace(PTRACE_POKETEXT, pid, (void*)g_fbps[i].addr, (void*)nw);
         g_fbps[i].armed = false;
+    }
+    /* Restore any return-address breakpoints. */
+    for (int i = 0; i < g_nrbps; i++) {
+        if (!g_rbps[i].armed) continue;
+        errno = 0;
+        unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)g_rbps[i].addr, NULL);
+        if (w == (unsigned long)-1 && errno) continue;
+        unsigned long nw = (w & ~0xffUL) | (unsigned long)g_rbps[i].orig_byte;
+        ptrace(PTRACE_POKETEXT, pid, (void*)g_rbps[i].addr, (void*)nw);
+        g_rbps[i].armed = false;
     }
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 

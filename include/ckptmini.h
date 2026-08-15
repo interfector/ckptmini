@@ -569,8 +569,9 @@ void cmd_calltrace(pid_t pid, bool syms);
  * @param pid Process ID
  * @param nnames Number of symbol names
  * @param names Array of symbol names (e.g. "printf", "strlen")
+ * @param retval Capture each function's return value (-r)
  */
-void cmd_ftrace(pid_t pid, int nnames, char **names);
+void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval);
 
 /**
  * @brief Change memory protection
