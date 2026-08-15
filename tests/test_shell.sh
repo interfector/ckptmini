@@ -82,13 +82,22 @@ if [ -x "$TESTLOOP" ]; then
         fail "attach/register/memory flow (output: $(echo "$OUT" | tr '\n' '|'))"
     fi
 
-    OUT=$(printf 'set $pid = %d\nexpr $rip\ncontinue\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
+    OUT=$(printf 'set $pid = %d\nexpr $rip\ncontinue\nexpr $pid\nset\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
     if echo "$OUT" | grep -q '\$pid = '"$TPID"' (held stopped)' && \
        echo "$OUT" | grep -q '^0x[0-9a-f]*$' && \
-       echo "$OUT" | grep -q "released held pid"; then
-        pass "set \$pid attaches and continue releases the hold"
+       echo "$OUT" | grep -q "released held pid" && \
+       echo "$OUT" | grep -q '\$pid = '"$TPID"' (not held)'; then
+        pass "set \$pid attaches, continue releases, \$pid survives the release"
     else
-        fail "set \$pid/continue (output: $(echo "$OUT" | tr '\n' '|'))"
+        fail "set \$pid/continue/\$pid persistence (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+
+    OUT=$(printf 'attach %d\ndump\nexpr $rip\ndetach\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q 'PID '"$TPID"' ' && \
+       echo "$OUT" | grep -q '^0x[0-9a-f]*$'; then
+        pass "commands default to \$pid when the pid is omitted (dump while held)"
+    else
+        fail "default-pid injection (output: $(echo "$OUT" | tr '\n' '|'))"
     fi
 
     OUT=$(printf 'attach %d\nstep %d 2\nexpr $rip\ndetach\nquit\n' "$TPID" "$TPID" | "$CKPTMINI" -i 2>&1)

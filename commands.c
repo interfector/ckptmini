@@ -517,9 +517,9 @@ void cmd_trace(pid_t pid) {
     else printf("Tracing syscalls for PID %d...\n", pid);
 
     bool in_syscall = false;
-    while (1) {
+    while (!g_interrupt) {
         if (ptrace(PTRACE_SYSCALL, pid, NULL, NULL) == -1) break;
-        waitpid(pid, &st, __WALL);
+        if (waitpid_eintr(pid, &st) == -1) break;
 
         if (WIFEXITED(st)) {
             printf("Process %d exited.\n", pid);
@@ -532,7 +532,8 @@ void cmd_trace(pid_t pid) {
 
         if (WIFSTOPPED(st) && WSTOPSIG(st) == (SIGTRAP | 0x80)) {
             regs_t regs;
-            if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+            errno = 0;
+            if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { fprintf(stderr, "[dbg] GETREGS err=%d %s (in_syscall=%d)\n", errno, strerror(errno), in_syscall); break; }
 
             if (!in_syscall) {
                 if (g_is_tty) printf(A_CYAN "  [entry]" A_RESET " syscall(%lld) args: %016llx %016llx %016llx\n",

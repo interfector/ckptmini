@@ -17,6 +17,11 @@ typedef struct {
 static shell_var_t g_vars[SHELL_MAX_VARS];
 static size_t g_nvars = 0;
 
+/* Last pid named by `attach <pid>` / `set $pid <pid>`.  Unlike the hold
+   (g_held_pid), this survives `continue`/`detach` so $pid and the default-pid
+   substitution keep working after the target is released. */
+static pid_t g_last_pid = -1;
+
 static shell_var_t *shell_var_lookup(const char *name) {
     for (size_t i = 0; i < g_nvars; i++)
         if (!strcmp(g_vars[i].name, name)) return &g_vars[i];
@@ -40,9 +45,9 @@ static void shell_var_set(const char *name, uint64_t value) {
  */
 static bool resolve_var_value(const char *name, uint64_t *out) {
     if (!strcmp(name, "pid")) {
-        if (g_held_pid == -1) return false;
-        *out = (uint64_t)g_held_pid;
-        return true;
+        if (g_held_pid != -1) { *out = (uint64_t)g_held_pid; return true; }
+        if (g_last_pid != -1) { *out = (uint64_t)g_last_pid; return true; }
+        return false;
     }
     if (g_held_pid != -1) {
         struct user_regs_struct regs;
@@ -391,21 +396,76 @@ static bool cmd_resumes_target(const char *cmd) {
     return false;
 }
 
+/* Commands where argv[2] is NOT a target pid (program name, dump dir, ...).
+   All other commands default to $pid when the pid argument is omitted. */
+static bool cmd_uses_pid_arg(const char *cmd) {
+    static const char *const nopid[] = {
+        "setreg_dump", "show_dump", "read_dump",
+        "write_dump", "write_dump_str",
+        "search_dump_str", "search_dump_bytes",
+        "search_dump_all_str", "search_dump_all_bytes",
+        "spawn", "spawn_show", NULL
+    };
+    for (int i = 0; nopid[i]; i++)
+        if (!strcmp(cmd, nopid[i])) return false;
+    return true;
+}
+
+static bool str_is_numeric(const char *s) {
+    if (!s || !*s) return false;
+    if (!strncmp(s, "0x", 2) || !strncmp(s, "0X", 2)) s += 2;
+    if (!*s) return false;
+    for (; *s; s++)
+        if (!isdigit((unsigned char)*s)) return false;
+    return true;
+}
+
+/*
+ * If the command takes a target pid and the pid argument was omitted (or is a
+ * symbol name like `ftrace printf`), substitute $pid so commands can be typed
+ * without repeating the pid.  On success args[1..] shift right by one and
+ * *nargs grows by one; the caller frees the injected token with the rest.
+ */
+static void shell_inject_pid(char **args, int *nargs) {
+    const char *cmd = args[0];
+    int n = *nargs;
+    if (n < 1 || n >= SHELL_MAX_ARGS - 1) return;
+    if (!cmd_uses_pid_arg(cmd)) return;
+    if (n >= 2 && str_is_numeric(args[1])) return;
+
+    uint64_t v;
+    if (!resolve_var_value("pid", &v)) return;
+
+    char *pidtok = malloc(32);
+    if (!pidtok) return;
+    snprintf(pidtok, 32, "%d", (int)v);
+    for (int i = n; i >= 2; i--) args[i] = args[i - 1];
+    args[1] = pidtok;
+    args[n + 1] = NULL;
+    *nargs = n + 1;
+}
+
 static void shell_print_help(void) {
     usage("ckptmini");
     fprintf(stderr, "\n  %s\n", "Shell Commands:");
     fprintf(stderr, "  %-24s %s\n", "attach <pid>", "Attach and hold the target stopped");
+    fprintf(stderr, "  %-24s %s\n", "detach", "Release the held target (it resumes; $pid is kept)");
+    fprintf(stderr, "  %-24s %s\n", "continue / cont", "Same as detach (release the hold)");
     fprintf(stderr, "  %-24s %s\n", "set $name <expr>", "Set a shell variable ($pid attaches; $reg writes the register)");
     fprintf(stderr, "  %-24s %s\n", "set", "List shell variables");
     fprintf(stderr, "  %-24s %s\n", "expr <expr>", "Evaluate an expression ($vars, registers, *(mem) reads)");
-    fprintf(stderr, "  %-24s %s\n", "detach", "Release the held target (it resumes)");
-    fprintf(stderr, "  %-24s %s\n", "continue / cont", "Same as detach (release the hold)");
     fprintf(stderr, "  %-24s %s\n", "quit / exit", "Leave the shell");
+    fprintf(stderr, "\n  %s\n", "Target commands (trace, ftrace, dump, ...) default to $pid when the pid is omitted.");
 }
 
 static void shell_set(char **args, int nargs) {
     if (nargs == 1) {
-        printf("$pid = %s\n", g_held_pid == -1 ? "<not set>" : "(set)");
+        if (g_held_pid != -1)
+            printf("$pid = %d (held stopped)\n", (int)g_held_pid);
+        else if (g_last_pid != -1)
+            printf("$pid = %d (not held)\n", (int)g_last_pid);
+        else
+            printf("$pid = <not set>\n");
         for (size_t i = 0; i < g_nvars; i++)
             printf("$%s = 0x%llx\n", g_vars[i].name, (unsigned long long)g_vars[i].value);
         return;
@@ -431,9 +491,12 @@ static void shell_set(char **args, int nargs) {
     if (!shell_eval_expr(expr, &v)) return;
 
     if (!strcmp(vname, "pid")) {
+        g_last_pid = (pid_t)v;
         hold_pid((pid_t)v);
         if (g_held_pid == (pid_t)v)
             printf("$pid = %d (held stopped)\n", (int)g_held_pid);
+        else
+            printf("$pid = %d (not held)\n", (int)g_last_pid);
         return;
     }
 
@@ -458,8 +521,10 @@ static void shell_set(char **args, int nargs) {
 
 /*
  * Execute one shell line.  Returns 1 when the shell should exit (quit/exit).
+ * *nargs is updated in place so the caller frees injected pid tokens too.
  */
-static int shell_exec(char **args, int nargs) {
+static int shell_exec(char **args, int *nargs_p) {
+    int nargs = *nargs_p;
     if (nargs == 0) return 0;
     const char *cmd = args[0];
 
@@ -468,9 +533,12 @@ static int shell_exec(char **args, int nargs) {
 
     if (!strcmp(cmd, "attach")) {
         if (nargs != 2) { fprintf(stderr, "usage: attach <pid>\n"); return 0; }
+        g_last_pid = (pid_t)atoi(args[1]);
         hold_pid((pid_t)atoi(args[1]));
         if (g_held_pid != -1)
             printf("attached to %d (held stopped)\n", (int)g_held_pid);
+        else
+            printf("attach failed; $pid = %d\n", (int)g_last_pid);
         return 0;
     }
 
@@ -485,8 +553,10 @@ static int shell_exec(char **args, int nargs) {
     }
 
     if (!strcmp(cmd, "resume")) {
-        if (nargs == 1 || (nargs == 2 && (pid_t)atoi(args[1]) == g_held_pid)) {
-            if (g_held_pid != -1) release_hold();
+        /* With a held pid (explicitly or by $pid default), resume = release.
+           Otherwise fall through so `resume <pid>` reaches the CLI. */
+        if (g_held_pid != -1 && (nargs == 1 || (nargs == 2 && (pid_t)atoi(args[1]) == g_held_pid))) {
+            release_hold();
             printf("continued\n");
             return 0;
         }
@@ -513,6 +583,10 @@ static int shell_exec(char **args, int nargs) {
         printf("releasing held pid %d\n", (int)g_held_pid);
         release_hold();
     }
+
+    /* Substitute $pid for a missing/non-numeric pid argument. */
+    shell_inject_pid(args, &nargs);
+    *nargs_p = nargs;
 
     char *dargv[SHELL_MAX_ARGS + 1];
     int dc = 0;
@@ -559,7 +633,7 @@ int cmd_shell(int argc, char **argv) {
         int nargs = 0;
         char **args = shell_tokenize(t, &nargs);
         if (args) {
-            int rc = shell_exec(args, nargs);
+            int rc = shell_exec(args, &nargs);
             for (int i = 0; i < nargs; i++) free(args[i]);
             free(args);
             if (rc) { free(line); break; }
