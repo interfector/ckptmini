@@ -766,6 +766,148 @@ void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms) {
     free(buf);
 }
 
+/* ---------------- call/jmp/ret flow tracing ---------------- */
+
+static void print_calltrace_line(unsigned long long count, int depth,
+                                 const cs_insn *insn, uint64_t rip, bool syms) {
+    if (g_is_tty) printf(A_CYAN "[%06llu]" A_RESET " depth=%d  ", count, depth);
+    else printf("[%06llu] depth=%d  ", count, depth);
+
+    if (syms) {
+        symres_t r = elfsym_resolve(rip);
+        if (r.found) {
+            if (g_is_tty) printf(A_DIM A_BOLD);
+            if (r.delta) printf("%s+0x%llx: ", r.name, (unsigned long long)r.delta);
+            else printf("%s: ", r.name);
+            if (g_is_tty) printf(A_RESET);
+        } else {
+            printf("0x%016llx: ", (unsigned long long)rip);
+        }
+    } else {
+        printf("0x%016llx: ", (unsigned long long)rip);
+    }
+
+    if (g_is_tty) printf(A_GREEN);
+    printf("%s %s", insn->mnemonic, insn->op_str);
+    if (g_is_tty) printf(A_RESET);
+
+    /* For direct calls/jumps, annotate the resolved callee with -s. */
+    if (syms && insn->detail && insn->detail->x86.op_count > 0) {
+        const cs_x86_op *op = &insn->detail->x86.operands[0];
+        if (op->type == X86_OP_IMM) {
+            symres_t t = elfsym_resolve((uint64_t)op->imm);
+            if (t.found) {
+                if (g_is_tty) printf(A_DIM);
+                if (t.delta) printf("  -> %s+0x%llx", t.name, (unsigned long long)t.delta);
+                else printf("  -> %s", t.name);
+                if (g_is_tty) printf(A_RESET);
+            }
+        }
+    }
+    printf("\n");
+}
+
+void cmd_calltrace(pid_t pid, bool syms) {
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        if (errno == EPERM)      { fprintf(stderr, "calltrace: permission denied\n"); }
+        else if (errno == ESRCH) { fprintf(stderr, "calltrace: no such process %d\n", pid); }
+        else DIE("PTRACE_ATTACH calltrace");
+        return;
+    }
+    int st;
+    if (waitpid_eintr(pid, &st) == -1) {
+        perror("calltrace: waitpid attach");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+
+    /* Catch SIGINT so Ctrl+C stops the trace instead of killing us. */
+    install_sigint_stop();
+
+    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Tracing call/jmp/ret flow for PID %d. Press Ctrl+C to stop.\n" A_RESET, pid);
+    else printf("Tracing call/jmp/ret flow for PID %d...\n", pid);
+
+    csh handle;
+    if (!disas_open(&handle)) {
+        fprintf(stderr, "calltrace: capstone init failed\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return;
+    }
+    cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+    if (syms && elfsym_init(pid) != 0) {
+        fprintf(stderr, "calltrace: could not load symbols\n");
+        syms = false;
+    }
+
+    int depth = 0;
+    unsigned long long count = 0;
+    while (!g_interrupt) {
+        regs_t regs;
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+
+        unsigned char code[15];
+        size_t nbytes = 0;
+        for (size_t off = 0; off < sizeof(code); off += 8) {
+            errno = 0;
+            unsigned long w = (unsigned long)ptrace(PTRACE_PEEKTEXT, pid, (void*)(regs.rip + off), NULL);
+            if (w == (unsigned long)-1 && errno) break;
+            size_t n = (sizeof(code) - off < 8) ? sizeof(code) - off : 8;
+            memcpy(code + off, &w, n);
+            nbytes += n;
+        }
+
+        cs_insn *insn = NULL;
+        size_t nins = cs_disasm(handle, code, nbytes, regs.rip, 1, &insn);
+        if (nins > 0) {
+            const char *m = insn[0].mnemonic;
+            if (!strncmp(m, "call", 4) || !strncmp(m, "ret", 3) || !strncmp(m, "jmp", 3)) {
+                print_calltrace_line(count, depth, &insn[0], regs.rip, syms);
+                if (!strncmp(m, "call", 4)) depth++;
+                else if (!strncmp(m, "ret", 3) && depth > 0) depth--;
+                count++;
+            }
+            cs_free(insn, nins);
+        }
+
+        if (ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) == -1) break;
+        if (waitpid_eintr(pid, &st) == -1) break;
+
+        if (WIFSTOPPED(st)) {
+            int sig = WSTOPSIG(st);
+            if (sig == SIGTRAP) continue;
+            if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
+            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
+            else printf("(stopped by signal %d)\n", sig);
+            if (sig == SIGSEGV) {
+                siginfo_t si;
+                if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0)
+                    fprintf(stderr, "  SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
+                break;
+            }
+            continue;
+        }
+        if (WIFEXITED(st)) {
+            printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
+            break;
+        }
+        if (WIFSIGNALED(st)) {
+            printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
+            break;
+        }
+    }
+
+    /* Detach with signal 0: the tracee resumes without any pending SIGTRAP. */
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+
+    if (g_interrupt) {
+        if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
+        else printf("Stopped tracing PID %d (detached; process continues).\n", pid);
+    }
+
+    cs_close(&handle);
+    if (syms) elfsym_free();
+}
+
 /* ---------------- function (symbol) tracing ---------------- */
 
 typedef struct {
