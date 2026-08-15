@@ -514,8 +514,17 @@ void cmd_trace(pid_t pid);
 /**
  * @brief Trace instructions (single-step and print each instruction)
  * @param pid Process ID
+ * @param disasm Disassemble instructions with Capstone (default: raw bytes only)
  */
-void cmd_itrace(pid_t pid);
+void cmd_itrace(pid_t pid, bool disasm);
+
+/**
+ * @brief Disassemble a range of process memory with Capstone
+ * @param pid Process ID
+ * @param addr Start address
+ * @param len Number of bytes to disassemble
+ */
+void cmd_disas(pid_t pid, uint64_t addr, size_t len);
 
 /**
  * @brief Trace calls to the given functions, printing their arguments

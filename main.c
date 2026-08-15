@@ -82,8 +82,23 @@ int main(int argc, char **argv) {
     }
 
     if (!strcmp(argv[1], "itrace")) {
-        if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_itrace((pid_t)atoi(argv[2]));
+        if (argc < 3 || argc > 4) { usage(argv[0]); return EXIT_FAILURE; }
+        bool disasm = (argc == 4);
+        if (disasm && strcmp(argv[3], "-d") && strcmp(argv[3], "--disas")) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        cmd_itrace((pid_t)atoi(argv[2]), disasm);
+        return EXIT_SUCCESS;
+    }
+
+    if (!strcmp(argv[1], "disas")) {
+        if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)atoi(argv[2]);
+        uint64_t addr = strtoull(argv[3], NULL, 16);
+        size_t len = (size_t)strtoul(argv[4], NULL, 10);
+        if (len == 0) { fprintf(stderr, "disas: len must be > 0\n"); return EXIT_FAILURE; }
+        cmd_disas(pid, addr, len);
         return EXIT_SUCCESS;
     }
 
