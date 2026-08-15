@@ -127,7 +127,21 @@ int main(int argc, char **argv) {
 
     if (!strcmp(argv[1], "ftrace")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_ftrace((pid_t)atoi(argv[2]), argc - 3, &argv[3]);
+        bool retval = false;
+        int nnames = 0;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "-r") || !strcmp(argv[i], "--retval")) retval = true;
+            else nnames++;
+        }
+        if (nnames == 0) { usage(argv[0]); return EXIT_FAILURE; }
+        char **names = malloc((size_t)nnames * sizeof(char*));
+        if (!names) return EXIT_FAILURE;
+        int j = 0;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-r") && strcmp(argv[i], "--retval")) names[j++] = argv[i];
+        }
+        cmd_ftrace((pid_t)atoi(argv[2]), nnames, names, retval);
+        free(names);
         return EXIT_SUCCESS;
     }
 
