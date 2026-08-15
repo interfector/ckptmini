@@ -1429,10 +1429,19 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     g_retdepth = 0;
     g_retval_enabled = retval;
 
-    /* Resolve each requested symbol (reuses the existing dlsym machinery). */
+    /* Symbol table for the static-symbol fallback: dlsym cannot see .symtab
+       symbols, so ftrace uses it to resolve names like main/deep_function. */
+    bool have_syms = (elfsym_init(pid) == 0);
+
+    /* Resolve each requested symbol: dlsym first (honors interposition),
+       then the static symbol table. */
     for (int i = 0; i < nnames && g_nfbps < (int)(sizeof(g_fbps)/sizeof(g_fbps[0])); i++) {
-        uint64_t a = cmd_resolve(pid, names[i]);
-        if (a == 0) continue;
+        uint64_t a = cmd_resolve(pid, names[i], true);
+        if (a == 0 && have_syms) a = elfsym_lookup(names[i]);
+        if (a == 0) {
+            fprintf(stderr, "ftrace: unresolved symbol '%s'\n", names[i]);
+            continue;
+        }
         fbp_t *b = &g_fbps[g_nfbps];
         b->addr = a;
         snprintf(b->name, sizeof(b->name), "%s", names[i]);
@@ -1710,7 +1719,7 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
  * @param symbol_name Symbol name to resolve (e.g., "printf", "system")
  * @return Resolved symbol address, or 0 on failure
  */
-uint64_t cmd_resolve(pid_t pid, const char *symbol_name) {
+uint64_t cmd_resolve(pid_t pid, const char *symbol_name, bool quiet) {
     char line[1024];
 
     uint64_t local_libc = 0;
@@ -1776,16 +1785,18 @@ uint64_t cmd_resolve(pid_t pid, const char *symbol_name) {
     char *dlsym_argv[] = { arg0, arg1 };
     uint64_t result = 0;
 
-    cmd_call_ret(pid, remote_dlsym, 2, dlsym_argv, false, &result);
+    cmd_call_ret(pid, remote_dlsym, 2, dlsym_argv, false, &result, quiet);
 
     remote_syscall_x64(pid, __NR_munmap, name_addr, name_len, 0, 0, 0, 0);
 
     if (result == 0) {
-        fprintf(stderr, "resolve: dlsym failed for '%s'\n", symbol_name);
+        if (!quiet) fprintf(stderr, "resolve: dlsym failed for '%s'\n", symbol_name);
     } else {
-        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
-                symbol_name, (unsigned long long)result);
-        else printf("Resolved '%s' -> 0x%016llx\n", symbol_name, (unsigned long long)result);
+        if (!quiet) {
+            if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
+                    symbol_name, (unsigned long long)result);
+            else printf("Resolved '%s' -> 0x%016llx\n", symbol_name, (unsigned long long)result);
+        }
     }
 
     if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
@@ -1858,7 +1869,7 @@ void cmd_fds(pid_t pid) {
     closedir(d);
 }
 
-uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool detach, uint64_t *ret_val) {
+uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool detach, uint64_t *ret_val, bool quiet) {
     
     bool already_attached = false;
 
@@ -1917,16 +1928,20 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
 
     ptrace(PTRACE_SETREGS, pid, 0, &regs);
 
-    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Calling function at 0x%016llx (orig stack).\n" A_RESET, (unsigned long long)addr);
-    else printf("Calling function at 0x%016llx (orig stack).\n", (unsigned long long)addr);    
+    if (!quiet) {
+        if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Calling function at 0x%016llx (orig stack).\n" A_RESET, (unsigned long long)addr);
+        else printf("Calling function at 0x%016llx (orig stack).\n", (unsigned long long)addr);
+    }
 
     ptrace(PTRACE_CONT, pid, NULL, NULL);
 
     int st; waitpid(pid, &st, __WALL);
     if (WIFSTOPPED(st) && WSTOPSIG(st) == SIGTRAP) {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Call finished. RAX: 0x%llx\n" A_RESET, (unsigned long long)regs.rax);
-        else printf("Call finished. RAX: 0x%llx\n", (unsigned long long)regs.rax);
+        if (!quiet) {
+            if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Call finished. RAX: 0x%llx\n" A_RESET, (unsigned long long)regs.rax);
+            else printf("Call finished. RAX: 0x%llx\n", (unsigned long long)regs.rax);
+        }
     } else {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
         printf("  ⚠ Call stopped unexpectedly: status=0x%x, sig=%d\n", st, WIFSTOPPED(st) ? WSTOPSIG(st) : 0);
@@ -1945,7 +1960,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
 }
 
 uintptr_t cmd_call(pid_t pid, uint64_t addr, int argc, char **argv, bool detach) {
-    return cmd_call_ret(pid, addr, argc, argv, detach, NULL);
+    return cmd_call_ret(pid, addr, argc, argv, detach, NULL, false);
 }
 
 /**
@@ -2028,7 +2043,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
     char *dlopen_argv[] = { arg0, arg1 };
     uint64_t dlopen_result = 0;
 
-    cmd_call_ret(pid, remote_dlopen, 2, dlopen_argv, false, &dlopen_result);
+    cmd_call_ret(pid, remote_dlopen, 2, dlopen_argv, false, &dlopen_result, false);
 
     if (dlopen_result == 0) {
         fprintf(stderr, "load_so: dlopen failed\n");

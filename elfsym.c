@@ -182,6 +182,21 @@ symres_t elfsym_resolve(uint64_t addr) {
     return r;
 }
 
+/* Reverse lookup: runtime address of a symbol by name (covers static .symtab
+   symbols that dlsym cannot see). Returns 0 if not found. */
+uint64_t elfsym_lookup(const char *name) {
+    for (size_t i = 0; i < g_nmods; i++) {
+        elfsym_mod_t *m = &g_mods[i];
+        for (size_t j = 0; j < m->nsyms; j++) {
+            if (strcmp(m->syms[j].name, name) == 0) {
+                uint64_t addr = m->load_base + m->syms[j].value;
+                if (addr >= m->start && addr < m->end) return addr;
+            }
+        }
+    }
+    return 0;
+}
+
 void elfsym_free(void) {
     for (size_t i = 0; i < g_nmods; i++) {
         free(g_mods[i].path);
