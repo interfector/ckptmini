@@ -390,6 +390,31 @@ int prot_for_range(saved_map_t *maps, size_t nmaps, uint64_t start, uint64_t end
  */
 bool read_bytes_from_pid(pid_t pid, uintptr_t addr, void *data, size_t len);
 
+/* Symbol resolution for -s/--symbols output in itrace/disas. */
+typedef struct {
+    int found;          /**< 1 if a symbol matched */
+    const char *name;   /**< symbol name (valid until elfsym_free) */
+    uint64_t delta;     /**< offset from the symbol start */
+} symres_t;
+
+/**
+ * @brief Build a symbol table for the target's executable mappings
+ * Parses /proc/<pid>/maps and the backing ELF .symtab/.dynsym tables.
+ * @param pid Process ID
+ * @return 0 on success (at least one module loaded), -1 otherwise
+ */
+int elfsym_init(pid_t pid);
+
+/**
+ * @brief Resolve a runtime address to its nearest preceding symbol
+ * @param addr Address in the target
+ * @return symres_t with found=1 on a match
+ */
+symres_t elfsym_resolve(uint64_t addr);
+
+/** @brief Free all cached symbol modules */
+void elfsym_free(void);
+
 /**
  * @brief Write bytes to live process memory
  * Uses process_vm_writev first, falls back to /proc/PID/mem
@@ -515,16 +540,18 @@ void cmd_trace(pid_t pid);
  * @brief Trace instructions (single-step and print each instruction)
  * @param pid Process ID
  * @param disasm Disassemble instructions with Capstone (default: raw bytes only)
+ * @param syms Annotate instructions with symbol+offset labels
  */
-void cmd_itrace(pid_t pid, bool disasm);
+void cmd_itrace(pid_t pid, bool disasm, bool syms);
 
 /**
  * @brief Disassemble a range of process memory with Capstone
  * @param pid Process ID
  * @param addr Start address
  * @param len Number of bytes to disassemble
+ * @param syms Annotate instructions with symbol+offset labels
  */
-void cmd_disas(pid_t pid, uint64_t addr, size_t len);
+void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms);
 
 /**
  * @brief Trace calls to the given functions, printing their arguments
