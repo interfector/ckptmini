@@ -1586,6 +1586,58 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
    [rbp+8]) and, when it fires, the value in rax is printed and the process is
    detached just past the return, inside the caller. Ctrl+C aborts and detaches
    cleanly (never SIGTERM, which would leak the armed int3 into the tracee). */
+static bool exec_addr_in(uint64_t addr, const uint64_t (*exec)[2], int nexec) {
+    for (int i = 0; i < nexec; i++)
+        if (addr >= exec[i][0] && addr < exec[i][1]) return true;
+    return false;
+}
+
+/* Find the return address of the frame we are currently stopped in.
+   Frame-pointer functions keep it at [rbp+8], but frameless (-O2 leaf)
+   functions leave it somewhere above rsp, so scan the stack up from rsp for
+   the first slot whose value lands in an executable mapping.  When that slot
+   sits at or above a valid in-stack rbp, [rbp+8] is authoritative. */
+static uint64_t find_return_address(pid_t pid, const regs_t *regs) {
+    uint64_t rsp = regs->rsp, rbp = regs->rbp;
+    uint64_t exec[128][2];
+    int nexec = 0;
+    uint64_t stack_end = 0;
+
+    procmaps_iterator *it = parse_maps_live(pid);
+    if (!it) return 0;
+    procmaps_struct *map;
+    while ((map = pmparser_next(it)) != NULL) {
+        uint64_t s = (uint64_t)map->addr_start, e = (uint64_t)map->addr_end;
+        if (stack_end == 0 && rsp >= s && rsp < e) stack_end = e;
+        if (map->is_x && nexec < (int)(sizeof(exec) / sizeof(exec[0]))) {
+            exec[nexec][0] = s;
+            exec[nexec][1] = e;
+            nexec++;
+        }
+    }
+    pmparser_free(it);
+    if (stack_end == 0 || nexec == 0) return 0;
+
+    uint64_t limit = stack_end;
+    if (limit - rsp > 0x10000) limit = rsp + 0x10000;
+
+    uint64_t scan_pos = 0, scan_val = 0;
+    for (uint64_t a = rsp & ~7ULL; a + 8 <= limit; a += 8) {
+        uint64_t v = 0;
+        if (!read_bytes_from_pid(pid, a, &v, 8)) break;
+        if (exec_addr_in(v, exec, nexec)) { scan_pos = a; scan_val = v; break; }
+    }
+
+    /* If the slot is at/above a frame base, prefer [rbp+8] when it also points
+       into an executable mapping. */
+    if (scan_val && rbp > rsp && rbp < stack_end && scan_pos >= rbp) {
+        uint64_t r8 = 0;
+        if (read_bytes_from_pid(pid, rbp + 8, &r8, 8) && exec_addr_in(r8, exec, nexec))
+            return r8;
+    }
+    return scan_val;
+}
+
 void cmd_finish(pid_t pid) {
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "finish: permission denied\n"); }
@@ -1611,27 +1663,21 @@ void cmd_finish(pid_t pid) {
         return;
     }
 
-    /* The current frame's return address sits at [rbp+8] once the prologue set
-       up the frame pointer (push rbp; mov rbp, rsp). */
-    if (regs.rbp == 0) {
-        fprintf(stderr, "finish: rbp is 0 (no frame pointer); cannot find return address\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return;
-    }
-    uint64_t ret_addr = 0;
-    if (!read_bytes_from_pid(pid, regs.rbp + 8, &ret_addr, 8)) {
-        fprintf(stderr, "finish: could not read return address at [rbp+8] (0x%llx)\n",
-                (unsigned long long)(regs.rbp + 8));
+    uint64_t ret_addr = find_return_address(pid, &regs);
+    if (ret_addr == 0) {
+        fprintf(stderr, "finish: could not find the current frame's return address on the stack\n");
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return;
     }
 
-    bool have_syms = (elfsym_init(pid) == 0);
+    char fname[128];
     symres_t cur = { 0 };
-    char fname[128] = "<unknown>";
-    if (have_syms) {
+    if (elfsym_init(pid) == 0) {
         cur = elfsym_resolve(regs.rip);
         if (cur.found) snprintf(fname, sizeof(fname), "%s", cur.name);
+        else snprintf(fname, sizeof(fname), "<unknown@0x%llx>", (unsigned long long)regs.rip);
+    } else {
+        snprintf(fname, sizeof(fname), "<unknown@0x%llx>", (unsigned long long)regs.rip);
     }
 
     if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Finish" A_RESET);
