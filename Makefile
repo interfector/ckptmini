@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -I./include
 
 TARGET = ckptmini
-SOURCES = pmparser.c utils.c core.c commands.c elfsym.c main.c
+SOURCES = pmparser.c utils.c core.c commands.c elfsym.c shell.c main.c
 OBJECTS = $(SOURCES:.c=.o)
 
 PARASITE = parasite.elf
@@ -24,7 +24,7 @@ HIJACKLIB_SRC = tests/hijacklib.c
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS) $(PARASITE_OBJ)
-	$(CC) $(OBJECTS) $(PARASITE_OBJ) -o $(TARGET) -lcapstone
+	$(CC) $(OBJECTS) $(PARASITE_OBJ) -o $(TARGET) -lcapstone -lreadline
 
 $(PARASITE_OBJ): $(PARASITE_BIN)
 	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $(PARASITE_BIN) $(PARASITE_OBJ)
@@ -42,6 +42,7 @@ test: $(TEST_TARGETS) $(TESTLIB) $(HIJACKLIB)
 
 tests: all test_loop test_call test_thread test_static test_finish test_leaf $(TESTLIB) $(HIJACKLIB)
 	./tests/test_ckptmini.sh
+	./tests/test_shell.sh
 
 $(TESTLIB): $(TESTLIB_SRC)
 	gcc -shared -fPIC -fno-stack-protector -nostdlib -o tests/testlib.so $<

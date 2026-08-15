@@ -1,7 +1,6 @@
 #include "ckptmini.h"
 
-int main(int argc, char **argv) {
-    g_is_tty = is_tty();
+int dispatch(int argc, char **argv) {
     if (argc < 2) { usage(argv[0]); return EXIT_FAILURE; }
 
     if (!strcmp(argv[1], "setreg")) {
@@ -289,10 +288,10 @@ int main(int argc, char **argv) {
         if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Restoring dump %s into PID %d (with threads)\n", S_INFO, indir, pid);
         if (g_is_tty) printf(A_RESET);
-        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH restore_t");
+        if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH restore_t");
         waitpid(pid, NULL, __WALL);
         restore_with_threads(pid, indir);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Restore complete (with threads). Use 'resume' to continue.\n", S_OK);
         if (g_is_tty) printf(A_RESET);
@@ -319,10 +318,10 @@ int main(int argc, char **argv) {
         if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Restoring dump %s into PID %d\n", S_INFO, indir, pid);
         if (g_is_tty) printf(A_RESET);
-        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH restore");
+        if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH restore");
         waitpid(pid, NULL, __WALL);
         restore_into(pid, indir);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Restore complete. Use 'resume' to continue.\n", S_OK);
         if (g_is_tty) printf(A_RESET);
@@ -337,10 +336,10 @@ int main(int argc, char **argv) {
         if (g_is_tty) printf(A_BOLD A_CYAN);
         printf("  %s Relocating dump %s into PID %d\n", S_INFO, indir, pid);
         if (g_is_tty) printf(A_RESET);
-        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH relocate");
+        if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH relocate");
         waitpid(pid, NULL, 0);
         relocate_into(pid, indir);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         if (g_is_tty) printf(A_BOLD A_GREEN);
         printf("  %s Relocation complete. Use 'resume' to continue.\n", S_OK);
         if (g_is_tty) printf(A_RESET);
@@ -380,7 +379,7 @@ int main(int argc, char **argv) {
         read(pipefd[0], &buf, 1);
         close(pipefd[0]);
         
-        if (ptrace(PTRACE_ATTACH, child, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
+        if (tracee_attach(child) == -1) DIE("PTRACE_ATTACH");
         waitpid(child, NULL, 0);
         
         fprintf(stderr, "[replay] Attached to child %d, restoring memory...\n", child);
@@ -388,7 +387,7 @@ int main(int argc, char **argv) {
         restore_into(child, indir);
         
         fprintf(stderr, "[replay] Detaching to let child continue...\n");
-        ptrace(PTRACE_DETACH, child, NULL, NULL);
+        tracee_detach(child, NULL);
         
         fprintf(stderr, "[replay] Done. Child %d should continue with restored state.\n", child);
         return EXIT_SUCCESS;
@@ -740,4 +739,18 @@ int main(int argc, char **argv) {
 
     usage(argv[0]);
     return EXIT_FAILURE;
+}
+
+int main(int argc, char **argv) {
+    g_is_tty = is_tty();
+
+    if (argc >= 2 && (!strcmp(argv[1], "-i") || !strcmp(argv[1], "--interactive"))) {
+        return cmd_shell(argc, argv);
+    }
+    if (argc < 2) {
+        if (g_is_tty) return cmd_shell(argc, argv);
+        usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    return dispatch(argc, argv);
 }

@@ -30,14 +30,14 @@ void save_meta(pid_t pid, const char *dir) {
 
 void checkpoint(pid_t pid, const char *outdir) {
     mkpath_or_die(outdir);
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
-    waitpid(pid, NULL, 0);
+    if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH");
+    tracee_wait(pid, NULL);
 
     save_meta(pid, outdir);
     save_regs(pid, outdir);
     save_maps_and_memory(pid, outdir);
 
-    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    if (tracee_detach(pid, NULL) == -1) DIE("PTRACE_DETACH");
     fprintf(stderr, "[ckpt] saved to %s\n", outdir);
 }
 
@@ -563,7 +563,7 @@ void stop_pid(pid_t pid) {
 }
 
 void cont_pid(pid_t pid) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno != EPERM) {
         if (errno == ESRCH) {
             fprintf(stderr, "PTRACE_ATTACH: No such process (pid=%d)\n", pid);
@@ -649,7 +649,7 @@ static void dump_regs_and_bytes(pid_t pid, const regs_t *r) {
 }
 
 void step_pid(pid_t pid, int max_steps) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno != EPERM) DIE("PTRACE_ATTACH in step");
     }
     int status; if (waitpid_eintr(pid, &status) == -1) DIE("waitpid step attach");
@@ -670,11 +670,11 @@ void step_pid(pid_t pid, int max_steps) {
             if (sig == SIGTRAP) {
                 dump_regs_and_bytes(pid, &r);
                 if (max_steps>0 && i+1>=max_steps) {
-                    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                    tracee_detach(pid, NULL);
                     return;
                 }
                 if (g_interrupt) {
-                    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                    tracee_detach(pid, NULL);
                     fprintf(stderr, "[step] interrupted; detached, process continues.\n");
                     return;
                 }
@@ -687,7 +687,7 @@ void step_pid(pid_t pid, int max_steps) {
                     fprintf(stderr, "[step] SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
             }
             dump_regs_and_bytes(pid, &r);
-            ptrace(PTRACE_DETACH, pid, NULL, (void *)(long)sig);
+            tracee_detach(pid, (void *)(long)sig);
             return;
         } else if (WIFEXITED(status)) {
             fprintf(stderr, "[step] process exited code=%d\n", WEXITSTATUS(status));
@@ -698,7 +698,7 @@ void step_pid(pid_t pid, int max_steps) {
         }
     }
     /* Loop ended early (Ctrl+C) while the tracee is stopped at a SIGTRAP stop. */
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
     if (g_interrupt) fprintf(stderr, "[step] interrupted; detached, process continues.\n");
 }
 
@@ -730,11 +730,11 @@ void show_maps_and_regs(show_mode_t mode, const char *arg) {
     struct user_regs_struct regs;
     if (mode == SHOW_LIVE) {
         pid_t pid = (pid_t)atoi(arg);
-        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) { perror("PTRACE_ATTACH"); return; }
-        waitpid(pid, NULL, 0);
-        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { perror("PTRACE_GETREGS"); ptrace(PTRACE_DETACH, pid, NULL, NULL); return; }
+        if (tracee_attach(pid) == -1) { perror("PTRACE_ATTACH"); return; }
+        tracee_wait(pid, NULL);
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { perror("PTRACE_GETREGS"); tracee_detach(pid, NULL); return; }
         printf("\nRegisters:\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
     } else {
         char rpath[512]; snprintf(rpath, sizeof(rpath), "%s/regs.bin", arg);
         FILE *rf = fopen(rpath, "rb");
@@ -821,8 +821,8 @@ int get_baseline_dir(const char *dir, char *out, size_t out_sz) {
 void incremental_checkpoint(pid_t pid, const char *outdir, const char *baseline_dir) {
     mkpath_or_die(outdir);
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
-    waitpid(pid, NULL, 0);
+    if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH");
+    tracee_wait(pid, NULL);
     
     if (baseline_dir) {
         FILE *f = fopen("/tmp/is_incremental", "w");
@@ -967,7 +967,7 @@ void incremental_checkpoint(pid_t pid, const char *outdir, const char *baseline_
     close(memfd);
     fclose(fout);
     
-    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    if (tracee_detach(pid, NULL) == -1) DIE("PTRACE_DETACH");
     
     if (baseline_dir) {
         fprintf(stderr, "[incr-ckpt] saved incremental to %s\n", outdir);
@@ -1093,7 +1093,7 @@ static void incremental_restore_regions(pid_t pid, const char *indir, const char
 }
 
 void incremental_restore(pid_t pid, const char *indir) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
+    if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH");
     waitpid(pid, NULL, 0);
     
     char base_dir[512] = {0};
@@ -1106,7 +1106,7 @@ void incremental_restore(pid_t pid, const char *indir) {
             incremental_restore_regions(pid, indir, base_dir);
         } else {
             fprintf(stderr, "[incr-restore] error: incremental but no baseline found\n");
-            if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+            if (tracee_detach(pid, NULL) == -1) DIE("PTRACE_DETACH");
             return;
         }
     } else {
@@ -1114,7 +1114,7 @@ void incremental_restore(pid_t pid, const char *indir) {
         incremental_restore_regions(pid, indir, NULL);
     }
     
-    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    if (tracee_detach(pid, NULL) == -1) DIE("PTRACE_DETACH");
     fprintf(stderr, "[incr-restore] done\n");
 }
 
@@ -1195,11 +1195,11 @@ void save_thread_regs(pid_t tid, const char *dir) {
     char regfile[512];
     snprintf(regfile, sizeof(regfile), "%s/regs.bin", tidpath);
 
-    if (ptrace(PTRACE_ATTACH, tid, NULL, NULL) == -1) {
+    if (tracee_attach(tid) == -1) {
         fprintf(stderr, "[save_thread] PTRACE_ATTACH failed for tid %d: %s\n", (int)tid, strerror(errno));
         return;
     }
-    waitpid(tid, NULL, 0);
+    tracee_wait(tid, NULL);
 
     int fd = open(regfile, O_CREAT|O_TRUNC|O_WRONLY, 0644);
     if (fd >= 0) {
@@ -1212,7 +1212,7 @@ void save_thread_regs(pid_t tid, const char *dir) {
         close(fd);
     }
 
-    ptrace(PTRACE_DETACH, tid, NULL, NULL);
+    tracee_detach(tid, NULL);
 }
 
 static void save_thread_stack(pid_t tid, const char *dir, uint64_t stack_start, uint64_t stack_end) {
@@ -1374,7 +1374,7 @@ void restore_threads(pid_t pid, const char *dir) {
         }
 
         if (clone_pid == 0) {
-            if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+            if (tracee_attach(pid) == -1) {
                 perror("PTRACE_ATTACH in child");
                 _exit(1);
             }
@@ -1384,7 +1384,7 @@ void restore_threads(pid_t pid, const char *dir) {
                 perror("PTRACE_SETREGS");
             }
 
-            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            tracee_detach(pid, NULL);
             _exit(0);
         }
 
@@ -1396,15 +1396,15 @@ void restore_threads(pid_t pid, const char *dir) {
 
 void checkpoint_with_threads(pid_t pid, const char *outdir) {
     mkpath_or_die(outdir);
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) DIE("PTRACE_ATTACH");
-    waitpid(pid, NULL, 0);
+    if (tracee_attach(pid) == -1) DIE("PTRACE_ATTACH");
+    tracee_wait(pid, NULL);
 
     save_meta(pid, outdir);
     save_regs(pid, outdir);
     save_maps_and_memory(pid, outdir);
     save_all_threads(pid, outdir);
 
-    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) DIE("PTRACE_DETACH");
+    if (tracee_detach(pid, NULL) == -1) DIE("PTRACE_DETACH");
     fprintf(stderr, "[ckpt] saved to %s (with threads)\n", outdir);
 }
 
