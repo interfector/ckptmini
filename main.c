@@ -111,6 +111,20 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (!strcmp(argv[1], "calltrace")) {
+        if (argc < 3 || argc > 4) { usage(argv[0]); return EXIT_FAILURE; }
+        bool syms = false;
+        if (argc == 4) {
+            if (strcmp(argv[3], "-s") && strcmp(argv[3], "--symbols")) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            syms = true;
+        }
+        cmd_calltrace((pid_t)atoi(argv[2]), syms);
+        return EXIT_SUCCESS;
+    }
+
     if (!strcmp(argv[1], "ftrace")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
         cmd_ftrace((pid_t)atoi(argv[2]), argc - 3, &argv[3]);

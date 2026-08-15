@@ -554,6 +554,16 @@ void cmd_itrace(pid_t pid, bool disasm, bool syms);
 void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms);
 
 /**
+ * @brief Trace only call/jmp/ret instructions (function-call graph)
+ * Single-steps the process but only logs flow-changing instructions,
+ * tracking a rough call depth. With -s, addresses are annotated with
+ * symbol+offset labels and direct call/jump targets are resolved.
+ * @param pid Process ID
+ * @param syms Annotate with symbols
+ */
+void cmd_calltrace(pid_t pid, bool syms);
+
+/**
  * @brief Trace calls to the given functions, printing their arguments
  * (printf-family format strings are parsed to print varargs)
  * @param pid Process ID
