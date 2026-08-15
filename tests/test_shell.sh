@@ -65,6 +65,37 @@ else
     fail "error reporting (output: $(echo "$OUT" | tr '\n' '|'))"
 fi
 
+info "Shell: quoting and hex pids"
+if [ -x "$TESTLOOP" ]; then
+    "$TESTLOOP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.2
+    HEX=$(printf '0x%x' "$TPID")
+    OUT=$(printf 'attach %s\nexpr $pid\ndetach\nquit\n' "$HEX" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q "attached to $TPID (held stopped)" && \
+       echo "$OUT" | grep -q "^0x$(printf '%x' "$TPID")$"; then
+        pass "attach accepts a hex pid (expr \$pid output is reusable)"
+    else
+        fail "hex pid attach (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+
+    "$TESTLOOP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.2
+    OUT=$(printf "attach %d\nupload --str 'Hello World'\nquit\n" "$TPID" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q "Uploaded 11 bytes"; then
+        pass "quoted strings keep spaces ('Hello World' uploads 11 bytes)"
+    else
+        fail "quoted string upload (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+fi
+
 info "Shell: attach / registers / memory / hold release"
 if [ -x "$TESTLOOP" ]; then
     "$TESTLOOP" >/dev/null 2>&1 &

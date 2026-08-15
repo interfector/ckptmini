@@ -357,15 +357,40 @@ static char **shell_tokenize(const char *line, int *nargs_out) {
     while (*p && n < SHELL_MAX_ARGS) {
         while (*p == ' ' || *p == '\t') p++;
         if (!*p) break;
-        const char *start = p;
-        while (*p && *p != ' ' && *p != '\t') p++;
-        size_t len = (size_t)(p - start);
-        char *tok = malloc(len + 1);
+
+        /* One token; '...' and "..." keep their content (spaces included) as a
+           single argument.  Quoted content is literal: no $ / $() expansion. */
+        char buf[1024];
+        size_t blen = 0;
+        bool had_quotes = false;
+        bool unterminated = false;
+        while (*p && *p != ' ' && *p != '\t') {
+            if (*p == '\'' || *p == '"') {
+                char q = *p++;
+                had_quotes = true;
+                while (*p && *p != q) {
+                    if (blen + 1 < sizeof(buf)) buf[blen++] = *p;
+                    p++;
+                }
+                if (!*p) { unterminated = true; break; }
+                p++;  /* closing quote */
+            } else {
+                if (blen + 1 < sizeof(buf)) buf[blen++] = *p;
+                p++;
+            }
+        }
+        if (unterminated) {
+            fprintf(stderr, "shell: unterminated quote\n");
+            for (int i = 0; i < n; i++) free(args[i]);
+            free(args);
+            return NULL;
+        }
+        buf[blen] = '\0';
+
+        char *tok = strdup(buf);
         if (!tok) { free(args); return NULL; }
-        memcpy(tok, start, len);
-        tok[len] = '\0';
         /* The variable name in `set $name <expr>` must stay literal. */
-        if (n == 1 && args[0] && !strcmp(args[0], "set")) {
+        if (had_quotes || (n == 1 && args[0] && !strcmp(args[0], "set"))) {
             args[n] = tok;
         } else {
             args[n] = shell_expand_token(tok);
@@ -533,8 +558,10 @@ static int shell_exec(char **args, int *nargs_p) {
 
     if (!strcmp(cmd, "attach")) {
         if (nargs != 2) { fprintf(stderr, "usage: attach <pid>\n"); return 0; }
-        g_last_pid = (pid_t)atoi(args[1]);
-        hold_pid((pid_t)atoi(args[1]));
+        pid_t pid = (pid_t)strtoull(args[1], NULL, 0);
+        if (pid <= 0) { fprintf(stderr, "attach: invalid pid '%s'\n", args[1]); return 0; }
+        g_last_pid = pid;
+        hold_pid(pid);
         if (g_held_pid != -1)
             printf("attached to %d (held stopped)\n", (int)g_held_pid);
         else
@@ -555,7 +582,7 @@ static int shell_exec(char **args, int *nargs_p) {
     if (!strcmp(cmd, "resume")) {
         /* With a held pid (explicitly or by $pid default), resume = release.
            Otherwise fall through so `resume <pid>` reaches the CLI. */
-        if (g_held_pid != -1 && (nargs == 1 || (nargs == 2 && (pid_t)atoi(args[1]) == g_held_pid))) {
+        if (g_held_pid != -1 && (nargs == 1 || (nargs == 2 && (pid_t)strtoull(args[1], NULL, 0) == g_held_pid))) {
             release_hold();
             printf("continued\n");
             return 0;

@@ -5,7 +5,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "setreg")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *regname = argv[3];
         uint64_t value = strtoull(argv[4], NULL, 0);
         int ret = setreg(SETREG_LIVE, &pid, regname, value);
@@ -41,7 +41,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "watch")) {
         if (argc < 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid      = (pid_t)atoi(argv[2]);
+        pid_t pid      = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr  = strtoull(argv[3], NULL, 16);
         size_t len     = (size_t)strtoul(argv[4], NULL, 10);
         unsigned int interval_ms = (argc >= 6) ? (unsigned int)atoi(argv[5]) : 500;
@@ -52,7 +52,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "snapshot_diff")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid       = (pid_t)atoi(argv[2]);
+        pid_t pid       = (pid_t)strtoull(argv[2], NULL, 0);
         const char *dir = argv[3];
         cmd_snapshot_diff(pid, dir);
         return EXIT_SUCCESS;
@@ -60,7 +60,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "breakpoint")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid     = (pid_t)atoi(argv[2]);
+        pid_t pid     = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         cmd_breakpoint(pid, addr);
         return EXIT_SUCCESS;
@@ -68,7 +68,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "inject_shellcode")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid       = (pid_t)atoi(argv[2]);
+        pid_t pid       = (pid_t)strtoull(argv[2], NULL, 0);
         const char *hex = argv[3];
         cmd_inject_shellcode(pid, hex);
         return EXIT_SUCCESS;
@@ -76,7 +76,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "trace")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_trace((pid_t)atoi(argv[2]));
+        cmd_trace((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
@@ -88,7 +88,7 @@ int dispatch(int argc, char **argv) {
             else if (!strcmp(argv[i], "-s") || !strcmp(argv[i], "--symbols")) syms = true;
             else { usage(argv[0]); return EXIT_FAILURE; }
         }
-        cmd_itrace((pid_t)atoi(argv[2]), disasm, syms);
+        cmd_itrace((pid_t)strtoull(argv[2], NULL, 0), disasm, syms);
         return EXIT_SUCCESS;
     }
 
@@ -102,7 +102,7 @@ int dispatch(int argc, char **argv) {
             }
             syms = true;
         }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         size_t len = (size_t)strtoul(argv[4], NULL, 10);
         if (len == 0) { fprintf(stderr, "disas: len must be > 0\n"); return EXIT_FAILURE; }
@@ -120,7 +120,7 @@ int dispatch(int argc, char **argv) {
             }
             syms = true;
         }
-        cmd_calltrace((pid_t)atoi(argv[2]), syms);
+        cmd_calltrace((pid_t)strtoull(argv[2], NULL, 0), syms);
         return EXIT_SUCCESS;
     }
 
@@ -139,57 +139,57 @@ int dispatch(int argc, char **argv) {
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-r") && strcmp(argv[i], "--retval")) names[j++] = argv[i];
         }
-        cmd_ftrace((pid_t)atoi(argv[2]), nnames, names, retval);
+        cmd_ftrace((pid_t)strtoull(argv[2], NULL, 0), nnames, names, retval);
         free(names);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "finish")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_finish((pid_t)atoi(argv[2]));
+        cmd_finish((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "backtrace")) {
         if (argc < 3) { usage(argv[0]); return EXIT_FAILURE; }
         bool pause = (argc >= 4 && !strcmp(argv[3], "-p"));
-        cmd_backtrace((pid_t)atoi(argv[2]), pause);
+        cmd_backtrace((pid_t)strtoull(argv[2], NULL, 0), pause);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "mprotect")) {
         if (argc != 6) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_mprotect((pid_t)atoi(argv[2]), strtoull(argv[3], NULL, 16), (size_t)strtoull(argv[4], NULL, 0), argv[5]);
+        cmd_mprotect((pid_t)strtoull(argv[2], NULL, 0), strtoull(argv[3], NULL, 16), (size_t)strtoull(argv[4], NULL, 0), argv[5]);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "call")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_call((pid_t)atoi(argv[2]), strtoull(argv[3], NULL, 16), argc - 4, &argv[4], true);
+        cmd_call((pid_t)strtoull(argv[2], NULL, 0), strtoull(argv[3], NULL, 16), argc - 4, &argv[4], true);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "signals")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_signals((pid_t)atoi(argv[2]));
+        cmd_signals((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "fds")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_fds((pid_t)atoi(argv[2]));
+        cmd_fds((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "load_so")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_load_so((pid_t)atoi(argv[2]), argv[3]);
+        cmd_load_so((pid_t)strtoull(argv[2], NULL, 0), argv[3]);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "upload")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         int prot = 0;
 
         if (!strcmp(argv[3], "--str")) {
@@ -219,7 +219,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "resolve")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *symbol = argv[3];
         uint64_t addr = cmd_resolve(pid, symbol, false);
         return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -227,7 +227,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "save")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *outdir = argv[3];
         checkpoint(pid, outdir);
         return EXIT_SUCCESS;
@@ -235,7 +235,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "incr_save")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *outdir = argv[3];
         const char *baseline = argv[4];
         incremental_checkpoint(pid, outdir, baseline);
@@ -244,7 +244,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "incr_restore")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *indir = argv[3];
         
         if (g_is_tty) printf(A_BOLD A_CYAN);
@@ -259,7 +259,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "parasite")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *indir = argv[3];
         
         if (g_is_tty) printf(A_BOLD A_CYAN);
@@ -274,7 +274,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "save_t")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *outdir = argv[3];
         checkpoint_with_threads(pid, outdir);
         return EXIT_SUCCESS;
@@ -282,7 +282,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "restore_t")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *indir = argv[3];
         
         if (g_is_tty) printf(A_BOLD A_CYAN);
@@ -300,7 +300,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "threads")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        show_threads((pid_t)atoi(argv[2]));
+        show_threads((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
@@ -312,7 +312,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "restore")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *indir = argv[3];
         
         if (g_is_tty) printf(A_BOLD A_CYAN);
@@ -330,7 +330,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "relocate")) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *indir = argv[3];
         
         if (g_is_tty) printf(A_BOLD A_CYAN);
@@ -416,7 +416,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "resume")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        cont_pid((pid_t)atoi(argv[2]));
+        cont_pid((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
@@ -424,19 +424,19 @@ int dispatch(int argc, char **argv) {
         if (argc < 3) { usage(argv[0]); return EXIT_FAILURE; }
         int steps = 1;
         if (argc == 4) steps = atoi(argv[3]);
-        step_pid((pid_t)atoi(argv[2]), steps);
+        step_pid((pid_t)strtoull(argv[2], NULL, 0), steps);
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "stop")) {
         if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
-        stop_pid((pid_t)atoi(argv[2]));
+        stop_pid((pid_t)strtoull(argv[2], NULL, 0));
         return EXIT_SUCCESS;
     }
 
     if (!strcmp(argv[1], "write")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         const char *hex = argv[4];
         size_t blen = 0;
@@ -461,7 +461,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "write_str")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         const char *str = argv[4];
         size_t blen = strlen(str);
@@ -477,7 +477,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "read")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         uint64_t addr = strtoull(argv[3], NULL, 16);
         size_t len = (size_t)strtoul(argv[4], NULL, 10);
         unsigned char *buf = (unsigned char*)malloc(len);
@@ -498,7 +498,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "search_str")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *text = argv[3];
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = NULL };
@@ -509,7 +509,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "search_bytes")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *hex = argv[3];
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
@@ -560,7 +560,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "search_all_str")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *text = argv[3];
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = stdout };
@@ -570,7 +570,7 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "search_all_bytes")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        pid_t pid = (pid_t)atoi(argv[2]);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *hex = argv[3];
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
