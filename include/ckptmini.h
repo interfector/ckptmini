@@ -546,6 +546,15 @@ void cmd_inject_shellcode(pid_t pid, const char *hex);
 void cmd_trace(pid_t pid);
 
 /**
+ * @brief Finish / step-out: run until the current function returns
+ * Arms an int3 at the current frame's return address (via the ftrace -r
+ * return-address breakpoint machinery), resumes, and reports the value in
+ * rax when the breakpoint fires. Ctrl+C aborts and detaches cleanly.
+ * @param pid Process ID
+ */
+void cmd_finish(pid_t pid);
+
+/**
  * @brief Trace instructions (single-step and print each instruction)
  * @param pid Process ID
  * @param disasm Disassemble instructions with Capstone (default: raw bytes only)

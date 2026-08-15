@@ -145,6 +145,12 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
+    if (!strcmp(argv[1], "finish")) {
+        if (argc != 3) { usage(argv[0]); return EXIT_FAILURE; }
+        cmd_finish((pid_t)atoi(argv[2]));
+        return EXIT_SUCCESS;
+    }
+
     if (!strcmp(argv[1], "backtrace")) {
         if (argc < 3) { usage(argv[0]); return EXIT_FAILURE; }
         bool pause = (argc >= 4 && !strcmp(argv[3], "-p"));
