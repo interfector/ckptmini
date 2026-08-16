@@ -17,6 +17,8 @@ The core functionality allows you to freeze a running process and resume it late
 ./ckptmini replay /path/to/binary /tmp/checkpoint
 ```
 
+An interactive shell (`./ckptmini -i`) layers attach/detach, register and memory inspection, expression evaluation, and persistent conditional breakpoints on top of these commands (see [Interactive Shell](#interactive-shell)).
+
 This saves:
 - All CPU registers
 - Complete memory contents (stack, heap, code, libraries)
@@ -105,6 +107,7 @@ Example:
 |---------|-------------|
 | `show <pid>` | Display memory maps and registers of live process |
 | `show_dump <dir>` | Display memory maps of a saved checkpoint |
+| `dump <pid\|dir>` | Display memory regions with colors (accepts a live pid or a checkpoint dir) |
 | `read_dump <dir> <addr> <len>` | Read memory from a checkpoint dump |
 | `write_dump <dir> <addr> <hex>` | Modify memory in a checkpoint file |
 | `write_dump_str <dir> <addr> <str>` | Write string to checkpoint dump |
@@ -117,10 +120,12 @@ Example:
 |---------|-------------|
 | `search_str <pid> <str> [seg]` | Search for string in process memory |
 | `search_all_str <pid> <str> [seg]` | Find all occurrences in process |
-| `search_dump_str <dir> <str> [seg]` | Search for string in checkpoint |
-| `search_dump_all_str <dir> <str>` | Find all matches in checkpoint |
 | `search_bytes <pid> <hex> [seg]` | Search for byte pattern in live process |
+| `search_all_bytes <pid> <hex> [seg]` | Find all byte-pattern occurrences in process |
+| `search_dump_str <dir> <str> [seg]` | Search for string in checkpoint |
+| `search_dump_all_str <dir> <str> [seg]` | Find all matches in checkpoint |
 | `search_dump_bytes <dir> <hex> [seg]` | Search for bytes in checkpoint |
+| `search_dump_all_bytes <dir> <hex> [seg]` | Find all byte matches in checkpoint |
 
 The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
@@ -134,12 +139,16 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 | `fds <pid>` | List all open file descriptors and their targets |
 | `signals <pid>` | Display signal handler configuration |
 | `trace <pid>` | Trace syscalls (strace-like output) |
-| `itrace <pid>` | Single-step and print each executed instruction (raw bytes for now) |
+| `itrace <pid> [-d] [-s]` | Single-step and print each executed instruction (`-d` disassemble with Capstone, `-s` resolve symbols) |
+| `calltrace <pid> [-s]` | Log call/jmp/ret flow (call graph); `-s` annotates symbols |
+| `ftrace <pid> <sym> [sym...] [-r]` | Trace calls to the named functions; `-r` captures return values |
+| `finish <pid>` | Run until the current function returns (step-out) |
+| `disas <pid> <addr> <len> [-s]` | Disassemble memory with Capstone; `-s` annotates symbols |
 
 **Limitations:**
 - `backtrace` may be inaccurate with optimized binaries or missing debug symbols
 - `trace` is basic; doesn't capture syscall arguments in full
-- `itrace` prints raw instruction bytes (no disassembler yet); disassembly planned for the future
+- `ftrace` relies on symbols being present in the target
 
 ### Debugging
 
@@ -151,15 +160,15 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
 Register names: rip, rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15.
 
-**Limitations:** The CLI `breakpoint` command is single-shot; it is removed after triggering. The interactive shell (`-i`) instead keeps persistent breakpoints (`break <addr|sym> [if <expr>]`), which survive across detach/re-attach and can be listed with `info break`, deleted with `del <n>` / `clear <addr>`, and driven with `continue`.
+**Limitations:** The CLI `breakpoint` command is single-shot; it is removed after triggering. For persistent conditional breakpoints, use the [interactive shell](#interactive-shell).
 
 ### Code Injection
 
 | Command | Description |
 |---------|-------------|
 | `inject_shellcode <pid> <hex>` | Write and execute machine code in process |
-| `upload <pid> <hex> <len> [perms]` | Upload bytes to remote process (for strings, shellcode, etc.) |
-| `upload <pid> --str <string> [perms]` | Upload string to remote process |
+| `upload <pid> <hex> [perms]` | Upload bytes to remote process (length derived from the hex; prints the allocated address) |
+| `upload <pid> --str <string> [perms]` | Upload a string to remote process |
 
 Example - spawn a shell:
 ```bash
@@ -179,7 +188,7 @@ Example - spawn a shell:
 | `call <pid> <addr> [args]` | Call function at address with arguments |
 | `load_so <pid> <path>` | Load shared library into process |
 | `resolve <pid> <symbol>` | Resolve symbol address using dlsym |
-| `upload <pid> <hex> <len> [perms]` | Upload bytes to remote process memory |
+| `upload <pid> <hex> [perms]` | Upload bytes to remote process memory |
 | `upload <pid> --str <string> [perms]` | Upload string to remote process memory |
 
 `load_so` and `resolve` use `dlopen`/`dlsym` internally to inject libraries or resolve symbols.
@@ -192,8 +201,8 @@ Example - spawn a shell:
 # Upload a string to remote process
 ./ckptmini upload 12345 --str "/bin/sh"
 
-# Upload binary data (5 bytes)
-./ckptmini upload 12345 48656c6c6f 5
+# Upload binary data (5 bytes: "Hello")
+./ckptmini upload 12345 48656c6c6f
 ```
 
 **Limitations:**
@@ -245,7 +254,6 @@ kill -STOP 12345
 
 | Command | Description |
 |---------|-------------|
-| `dump <dir>` | Legacy alias for creating checkpoint |
 | `snapshot_diff <pid> <dir>` | Compare live process memory to saved checkpoint |
 
 **Limitations:** Diff only shows changes; doesn't auto-merge.
@@ -259,6 +267,30 @@ kill -STOP 12345
 ### Hex Parsing
 
 The tool uses standard hex string format: `4831c0` = bytes [0x48, 0x31, 0xc0].
+
+## Interactive Shell
+
+Launch the shell with `./ckptmini -i` (or just `./ckptmini` on a TTY). It can attach to a process and hold it stopped, inspect registers and memory, evaluate expressions, and run persistent conditional breakpoints without leaving the tool.
+
+| Command | Description |
+|---------|-------------|
+| `attach <pid>` | Attach and hold the target stopped |
+| `detach` | Release the held target (it resumes; `$pid` is kept) |
+| `continue` / `cont` | Run until a breakpoint hits (otherwise release the hold) |
+| `break <addr\|sym> [if <expr>]` | Persistent breakpoint; condition evaluated at hit time |
+| `info break` | List breakpoints (address, state, hit count, condition) |
+| `del <n>` | Remove breakpoint by number |
+| `clear <addr>` | Remove breakpoint by address |
+| `set $name <expr>` | Set a shell variable (`set $pid <pid>` attaches; `set $reg <val>` writes the register) |
+| `set` | List shell variables |
+| `expr <expr>` | Evaluate an expression (`$vars`, registers, `*(mem)` reads) |
+| `quit` / `exit` | Leave the shell |
+
+- Break conditions keep `$registers`/`$vars` literal and are evaluated at hit time, e.g. `break tick if $rdi >= 0x10 && $rdi <= 0x20`.
+- On a hit the target stays held stopped with `$rip` at the breakpoint address for inspection; `continue` single-steps the real instruction and re-arms the int3 before resuming.
+- Breakpoints survive `detach` and are re-armed automatically on the next `attach`/`continue`.
+- Target commands (`trace`, `ftrace`, `dump`, ...) default to `$pid` when the pid argument is omitted.
+- Expressions support C-style precedence, including comparisons, logical and bitwise operators (`== != < <= > >= & ^ | && || ~ !`).
 
 ## Cool Features
 
