@@ -157,6 +157,7 @@ Commands that currently support `--json`:
 | `search_dump_all_bytes` / `search_dump_all_str` | `{"ok":true,"addrs":["0x...",...]}` |
 | `read` | `{"ok":true,"addr":"0x...","len":N,"hex":"...","ascii":"..."}` |
 | `write` / `write_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
+| `upload` / `upload_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
 | `resolve` / `elfresolve` | `{"ok":true,"name":"...","addr":"0x...","source":"dlsym\|elfsym"}` |
 | `call` | `{"ok":true,"addr":"0x...","retval":"0x..."}` |
 | `backtrace` | `{"ok":true,"frames":[{"n":N,"rip":"0x...","module":"..."},...]}` |

@@ -1967,21 +1967,23 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
     uint64_t remote_addr = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, len,
         prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)remote_addr < 0) {
-        fprintf(stderr, "upload: mmap failed (ret=%ld)\n", (long)remote_addr);
+        if (!g_json) fprintf(stderr, "upload: mmap failed (ret=%ld)\n", (long)remote_addr);
         if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
     if (!write_bytes_to_pid(pid, remote_addr, data, len)) {
-        fprintf(stderr, "upload: write failed at 0x%016llx\n", (unsigned long long)remote_addr);
+        if (!g_json) fprintf(stderr, "upload: write failed at 0x%016llx\n", (unsigned long long)remote_addr);
         remote_syscall_x64(pid, __NR_munmap, remote_addr, len, 0, 0, 0, 0);
         if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
-    if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Uploaded %zu bytes to 0x%016llx\n" A_RESET,
-            len, (unsigned long long)remote_addr);
-    else printf("Uploaded %zu bytes to 0x%016llx\n", len, (unsigned long long)remote_addr);
+    if (!g_json) {
+        if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Uploaded %zu bytes to 0x%016llx\n" A_RESET,
+                len, (unsigned long long)remote_addr);
+        else printf("Uploaded %zu bytes to 0x%016llx\n", len, (unsigned long long)remote_addr);
+    }
 
     if (!was_attached) tracee_detach(pid, NULL);
     return remote_addr;

@@ -239,22 +239,47 @@ int dispatch(int argc, char **argv) {
             size_t str_len = strlen(str);
             if (argc >= 6) {
                 prot = parse_perms(argv[5]);
-                if (prot < 0) { fprintf(stderr, "upload: invalid perms '%s'\n", argv[5]); return EXIT_FAILURE; }
+                if (prot < 0) {
+                    if (g_json) { json_err("upload_str", "invalid perms"); return EXIT_FAILURE; }
+                    fprintf(stderr, "upload: invalid perms '%s'\n", argv[5]); return EXIT_FAILURE;
+                }
             }
             uint64_t addr = cmd_upload(pid, str, str_len, prot);
-            return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+            if (addr == 0) {
+                if (g_json) { json_err("upload_str", "upload failed"); return EXIT_FAILURE; }
+                return EXIT_FAILURE;
+            }
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"upload_str\",\"addr\":\"0x%016llx\",\"bytes\":%zu}\n",
+                       (unsigned long long)addr, str_len);
+            }
+            return EXIT_SUCCESS;
         } else {
             const char *hex = argv[3];
             if (argc >= 5) {
                 prot = parse_perms(argv[4]);
-                if (prot < 0) { fprintf(stderr, "upload: invalid perms '%s'\n", argv[4]); return EXIT_FAILURE; }
+                if (prot < 0) {
+                    if (g_json) { json_err("upload", "invalid perms"); return EXIT_FAILURE; }
+                    fprintf(stderr, "upload: invalid perms '%s'\n", argv[4]); return EXIT_FAILURE;
+                }
             }
             size_t blen = 0;
             unsigned char *bytes = parse_hex(hex, &blen);
-            if (!bytes) { fprintf(stderr, "upload: invalid hex\n"); return EXIT_FAILURE; }
+            if (!bytes) {
+                if (g_json) { json_err("upload", "invalid hex"); return EXIT_FAILURE; }
+                fprintf(stderr, "upload: invalid hex\n"); return EXIT_FAILURE;
+            }
             uint64_t addr = cmd_upload(pid, bytes, blen, prot);
             free(bytes);
-            return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+            if (addr == 0) {
+                if (g_json) { json_err("upload", "upload failed"); return EXIT_FAILURE; }
+                return EXIT_FAILURE;
+            }
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"upload\",\"addr\":\"0x%016llx\",\"bytes\":%zu}\n",
+                       (unsigned long long)addr, blen);
+            }
+            return EXIT_SUCCESS;
         }
     }
 

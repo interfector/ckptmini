@@ -573,6 +573,22 @@ if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
         fail "json - resolve malformed (output: $JSON5)"
     fi
 
+    # upload returns an allocated addr
+    JSON6=$($CKPTMINI upload "$TESTCALL_PID" 9090 --json 2>&1)
+    if echo "$JSON6" | jq -e '.ok == true and .command == "upload" and (.addr | startswith("0x")) and .bytes == 2' >/dev/null 2>&1; then
+        pass "json - upload returns addr + bytes"
+    else
+        fail "json - upload malformed (output: $JSON6)"
+    fi
+
+    # upload --str returns ok + addr
+    JSON7=$($CKPTMINI upload "$TESTCALL_PID" --str hello --json 2>&1)
+    if echo "$JSON7" | jq -e '.ok == true and .command == "upload_str" and (.addr | startswith("0x")) and .bytes == 5' >/dev/null 2>&1; then
+        pass "json - upload_str returns addr + bytes"
+    else
+        fail "json - upload_str malformed (output: $JSON7)"
+    fi
+
     # a missing search yields ok:false and a nonzero exit code
     MISSING=$($CKPTMINI search_str "$TESTCALL_PID" zzzz_ckptmini_does_not_exist_zzzz --json 2>&1)
     RC=$?
