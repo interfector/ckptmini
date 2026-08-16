@@ -42,7 +42,8 @@ static void add_symbols(elfsym_mod_t *m, const Elf64_Sym *syms, size_t nsyms,
         unsigned int type = ELF64_ST_TYPE(s->st_info);
         if (s->st_name == 0 || s->st_name >= strsz) continue;
         if (s->st_value == 0) continue;
-        if (!(type == STT_FUNC || type == STT_GNU_IFUNC || type == STT_NOTYPE)) continue;
+        if (!(type == STT_FUNC || type == STT_GNU_IFUNC || type == STT_OBJECT ||
+              type == STT_NOTYPE)) continue;
         elfsym_t tmp;
         tmp.name = strdup(strtab + s->st_name);
         tmp.value = s->st_value;
@@ -189,8 +190,9 @@ uint64_t elfsym_lookup(const char *name) {
         elfsym_mod_t *m = &g_mods[i];
         for (size_t j = 0; j < m->nsyms; j++) {
             if (strcmp(m->syms[j].name, name) == 0) {
-                uint64_t addr = m->load_base + m->syms[j].value;
-                if (addr >= m->start && addr < m->end) return addr;
+                /* load_base applies to every segment of the module, so this is
+                   valid for data symbols too, not just those in the text map. */
+                return m->load_base + m->syms[j].value;
             }
         }
     }

@@ -921,6 +921,53 @@ else
 fi
 
 #######################################
+# TEST 38b: data symbol (STT_OBJECT) resolution
+# global_var is in .symtab only (not .dynsym), so dlsym cannot see it and
+# elfsym must also cover symbols outside the text mapping.
+#######################################
+info "Test 38b: data symbol resolution"
+
+"$TESTCALL" > "$TESTDIR/test_call_38b_output.txt" 2>&1 &
+TESTCALL_38B_PID=$!
+sleep 0.5
+
+GVADDR=$(sed -n 's/.*global_var is at \(0x[0-9a-f]*\).*/\1/p' "$TESTDIR/test_call_38b_output.txt" | head -1)
+
+if [ -n "$GVADDR" ] && kill -0 "$TESTCALL_38B_PID" 2>/dev/null; then
+    DATA_RES=$($CKPTMINI elfresolve "$TESTCALL_38B_PID" global_var 2>&1)
+    echo "$DATA_RES"
+
+    if echo "$DATA_RES" | grep -q "Resolved 'global_var'"; then
+        pass "elfresolve resolves data symbol (STT_OBJECT)"
+    else
+        fail "elfresolve - failed for global_var (output: $DATA_RES)"
+    fi
+
+    RESOLVE_DATA=$($CKPTMINI resolve "$TESTCALL_38B_PID" global_var 2>&1)
+    echo "$RESOLVE_DATA"
+
+    if echo "$RESOLVE_DATA" | grep -q "Resolved 'global_var'"; then
+        pass "resolve falls back to elfsym for data symbols"
+    else
+        fail "resolve - no elfsym fallback for global_var (output: $RESOLVE_DATA)"
+    fi
+
+    RESOLVED_ADDR=$(echo "$RESOLVE_DATA" | grep -o '0x[0-9a-f]*' | tail -1)
+    RESOLVED_HEX=$(printf '%x' "$(( RESOLVED_ADDR ))")
+    EXPECTED_HEX=$(printf '%x' "$(( GVADDR ))")
+    if [ "$RESOLVED_HEX" = "$EXPECTED_HEX" ]; then
+        pass "resolve matches target's printed global_var address"
+    else
+        fail "resolve address mismatch (got $RESOLVED_ADDR, expected $GVADDR)"
+    fi
+
+    kill -9 "$TESTCALL_38B_PID" 2>/dev/null || true
+    wait "$TESTCALL_38B_PID" 2>/dev/null || true
+else
+    warn "test_call/global_var address unavailable, skipping data symbol test"
+fi
+
+#######################################
 # TEST 39: finish (step-out)
 # Run until the current function returns, using the return-address
 # breakpoint machinery, and report the value left in rax.

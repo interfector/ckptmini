@@ -217,7 +217,7 @@ Example - spawn a shell:
 | `call <pid> <addr> [args]` | Call function at address with arguments |
 | `load_so <pid> <path>` | Load shared library into process |
 | `resolve <pid> <symbol>` | Resolve symbol address using dlsym (falls back to the ELF table if dlsym can't see it) |
-| `elfresolve <pid> <symbol>` | Resolve symbol address from the target's ELF symbol table (covers static `.symtab` symbols dlsym can't see) |
+| `elfresolve <pid> <symbol>` | Resolve symbol address from the target's ELF symbol table (covers static `.symtab` functions and data objects dlsym can't see) |
 | `upload <pid> <hex> [perms]` | Upload bytes to remote process memory |
 | `upload <pid> --str <string> [perms]` | Upload string to remote process memory |
 
