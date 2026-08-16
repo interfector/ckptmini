@@ -2319,7 +2319,12 @@ bool search_bytes_in_map_cb(pid_t pid, uint64_t start, uint64_t end, const char 
     for (size_t i=0; i+ctx->nlen <= len; i++) {
         if (memcmp(buf+i, ctx->needle, ctx->nlen) == 0) {
             if (ctx->out_all) {
-                fprintf(ctx->out_all, "%016llx\n", (unsigned long long)(start+i));
+                if (g_json) {
+                    uint64_t *na = (uint64_t*)realloc(ctx->addrs, (ctx->naddrs + 1) * sizeof(*na));
+                    if (na) { ctx->addrs = na; ctx->addrs[ctx->naddrs++] = start + i; }
+                } else {
+                    fprintf(ctx->out_all, "%016llx\n", (unsigned long long)(start+i));
+                }
             } else {
                 ctx->found = start + i;
                 free(buf);

@@ -507,6 +507,68 @@ else
 fi
 
 #######################################
+# Test 27c: JSON output mode (--json)
+#######################################
+info "Test 27c: JSON output mode"
+
+if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # search_bytes returns {"ok":true,"addr":"0x..."}
+    JSON=$($CKPTMINI search_bytes "$TESTCALL_PID" 9090 --json 2>&1)
+    echo "$JSON"
+    if echo "$JSON" | jq -e '.ok == true and (.addr | startswith("0x"))' >/dev/null 2>&1; then
+        pass "json - search_bytes returns ok + addr"
+    else
+        fail "json - search_bytes malformed (output: $JSON)"
+    fi
+
+    # search_all_bytes returns an addrs array
+    JSON2=$($CKPTMINI search_all_bytes "$TESTCALL_PID" 9090 --json 2>&1)
+    if echo "$JSON2" | jq -e '.ok == true and (.addrs | type == "array" and length > 0)' >/dev/null 2>&1; then
+        pass "json - search_all_bytes returns addrs array"
+    else
+        fail "json - search_all_bytes malformed (output: $JSON2)"
+    fi
+
+    # read returns hex bytes
+    ADDR=$(echo "$JSON" | jq -r '.addr')
+    JSON3=$($CKPTMINI read "$TESTCALL_PID" "$ADDR" 2 --json 2>&1)
+    if echo "$JSON3" | jq -e '.ok == true and (.hex | test("^[0-9a-f]+$"))' >/dev/null 2>&1; then
+        pass "json - read returns hex"
+    else
+        fail "json - read malformed (output: $JSON3)"
+    fi
+
+    # write returns ok + bytes (target is global_var's writable .data slot,
+    # whose address the target itself prints on startup)
+    GVADDR=$(sed -n 's/.*global_var is at \(0x[0-9a-f]*\).*/\1/p' "$TESTDIR/test_call_output.txt" | head -1)
+    JSON4=$($CKPTMINI write "$TESTCALL_PID" "$GVADDR" 9090 --json 2>&1)
+    if echo "$JSON4" | jq -e '.ok == true and .bytes == 2' >/dev/null 2>&1; then
+        pass "json - write returns ok + bytes"
+    else
+        fail "json - write malformed (output: $JSON4)"
+    fi
+
+    # resolve returns a source field
+    JSON5=$($CKPTMINI resolve "$TESTCALL_PID" printf --json 2>&1)
+    if echo "$JSON5" | jq -e '.ok == true and (.source == "dlsym" or .source == "elfsym")' >/dev/null 2>&1; then
+        pass "json - resolve returns source"
+    else
+        fail "json - resolve malformed (output: $JSON5)"
+    fi
+
+    # a missing search yields ok:false and a nonzero exit code
+    MISSING=$($CKPTMINI search_str "$TESTCALL_PID" zzzz_ckptmini_does_not_exist_zzzz --json 2>&1)
+    RC=$?
+    if [ "$RC" -ne 0 ] && echo "$MISSING" | jq -e '.ok == false' >/dev/null 2>&1; then
+        pass "json - missing search returns ok:false + nonzero exit"
+    else
+        fail "json - missing search (rc=$RC output: $MISSING)"
+    fi
+else
+    warn "jq missing or test_call not running, skipping JSON test"
+fi
+
+#######################################
 # TEST 28: Upload string to remote process (needs root)
 #######################################
 info "Test 28: upload --str command"

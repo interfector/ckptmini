@@ -179,20 +179,22 @@ static int live_maps_prot_for_range(pid_t pid, uint64_t start, uint64_t end, int
 bool mem_write_region(pid_t pid, uint64_t addr, const void *data, size_t len) {
     int prot = 0;
     if (live_maps_prot_for_range(pid, addr, addr + len, &prot) != 0) {
-        fprintf(stderr, "[mw] address range %016llx-%016llx not mapped in pid %d\n",
-                (unsigned long long)addr, (unsigned long long)(addr+len), (int)pid);
+        if (!g_json)
+            fprintf(stderr, "[mw] address range %016llx-%016llx not mapped in pid %d\n",
+                    (unsigned long long)addr, (unsigned long long)(addr+len), (int)pid);
         return false;
     }
     bool need_temp = (prot & PROT_WRITE) == 0;
     if (need_temp) {
         if (remote_mprotect(pid, addr, len, prot | PROT_WRITE) != 0) {
-            fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
-                    (unsigned long long)addr, (unsigned long long)(addr+len));
+            if (!g_json)
+                fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
+                        (unsigned long long)addr, (unsigned long long)(addr+len));
             return false;
         }
     }
     bool ok = write_bytes_to_pid(pid, addr, data, len);
-    if (!ok) perror("process write");
+    if (!ok && !g_json) perror("process write");
     if (need_temp) (void)remote_mprotect(pid, addr, len, prot);
     return ok;
 }

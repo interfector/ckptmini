@@ -131,6 +131,35 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
 **Limitations:** Searches are linear and slow on large memory regions.
 
+### JSON Output
+
+Append `--json` to a command to get machine-readable output on stdout (errors
+go to stderr, exit codes are unchanged). This lets commands be chained through
+pipes, e.g.:
+
+```bash
+# Find every occurrence of bytes 90 90 and write 00 at each address
+./ckptmini search_all_bytes 12345 9090 --json | jq -r '.addrs[]' | while read -r a; do
+    ./ckptmini write 12345 "$a" 00
+done
+
+# Read bytes at a resolved symbol's address
+./ckptmini read 12345 "$(./ckptmini elfresolve 12345 main --json | jq -r '.addr')" 16 --json
+```
+
+Commands that currently support `--json`:
+
+| Command | Output |
+|---------|--------|
+| `search_bytes` / `search_str` | `{"ok":true,"addr":"0x..."}` |
+| `search_all_bytes` / `search_all_str` | `{"ok":true,"addrs":["0x...",...]}` |
+| `read` | `{"ok":true,"addr":"0x...","len":N,"hex":"...","ascii":"..."}` |
+| `write` / `write_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
+| `resolve` / `elfresolve` | `{"ok":true,"name":"...","addr":"0x...","source":"dlsym\|elfsym"}` |
+
+On failure the object is `{"ok":false,"command":"...","error":"..."}` and the
+exit code is non-zero.
+
 ### Process Inspection
 
 | Command | Description |

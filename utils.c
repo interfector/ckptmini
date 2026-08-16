@@ -539,4 +539,7 @@ void usage(const char *prog) {
     fprintf(stderr, "  %-24s %s\n", "setreg <pid> <name>", "Set register value");
     fprintf(stderr, "  %-24s %s\n", "setreg_dump <dir> <name>", "Set register in saved dump");
     fprintf(stderr, "  %-24s %s\n", "watch <pid> <addr>", "Watch memory changes");
+    
+    fprintf(stderr, A_WHITE A_BOLD "\n  %s\n" A_RESET, "Global Flags:");
+    fprintf(stderr, "  %-24s %s\n", "--json", "Emit JSON output (search_*, read, write, resolve)");
 }

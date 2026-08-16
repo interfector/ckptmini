@@ -1,7 +1,39 @@
 #include "ckptmini.h"
 
+bool g_json = false;
+
+/* Emit a JSON string literal for buf[0..len) (escapes quotes/backslashes,
+   renders non-printables as '.'). */
+static void json_print_escaped(const unsigned char *buf, size_t len) {
+    putchar('"');
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = buf[i];
+        if (c == '"')       fputs("\\\"", stdout);
+        else if (c == '\\') fputs("\\\\", stdout);
+        else if (c >= 0x20 && c < 0x7f) putchar(c);
+        else putchar('.');
+    }
+    putchar('"');
+}
+
+static void json_err(const char *cmd, const char *msg) {
+    printf("{\"ok\":false,\"command\":\"%s\",\"error\":\"%s\"}\n", cmd, msg);
+}
+
 int dispatch(int argc, char **argv) {
     if (argc < 2) { usage(argv[0]); return EXIT_FAILURE; }
+
+    /* Global --json flag: strip it anywhere in argv (it may appear before or
+       after the command name) so the remaining args belong to the command. */
+    g_json = false;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) {
+            g_json = true;
+            for (int j = i; j + 1 < argc; j++) argv[j] = argv[j + 1];
+            argc--;
+            i--;
+        }
+    }
 
     if (!strcmp(argv[1], "setreg")) {
         if (argc != 5) { usage(argv[0]); return EXIT_FAILURE; }
@@ -221,15 +253,28 @@ int dispatch(int argc, char **argv) {
         if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
         pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *symbol = argv[3];
-        uint64_t addr = cmd_resolve(pid, symbol, false);
+        const char *source = "dlsym";
+        uint64_t addr = cmd_resolve(pid, symbol, g_json);
         if (addr == 0 && elfsym_init(pid) == 0) {
             addr = elfsym_lookup(symbol);
             if (addr != 0) {
-                if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx (elfsym)\n" A_RESET,
-                        symbol, (unsigned long long)addr);
-                else printf("Resolved '%s' -> 0x%016llx (elfsym)\n", symbol, (unsigned long long)addr);
+                source = "elfsym";
+                if (!g_json) {
+                    if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx (elfsym)\n" A_RESET,
+                            symbol, (unsigned long long)addr);
+                    else printf("Resolved '%s' -> 0x%016llx (elfsym)\n", symbol, (unsigned long long)addr);
+                }
             }
             elfsym_free();
+        }
+        if (g_json) {
+            if (addr != 0) {
+                printf("{\"ok\":true,\"command\":\"resolve\",\"name\":");
+                json_print_escaped((const unsigned char*)symbol, strlen(symbol));
+                printf(",\"addr\":\"0x%016llx\",\"source\":\"%s\"}\n", (unsigned long long)addr, source);
+            } else {
+                json_err("resolve", "unresolved symbol");
+            }
         }
         return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -239,16 +284,24 @@ int dispatch(int argc, char **argv) {
         pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *symbol = argv[3];
         if (elfsym_init(pid) != 0) {
+            if (g_json) { json_err("elfresolve", "no ELF symbols for pid"); return EXIT_FAILURE; }
             fprintf(stderr, "elfresolve: no ELF symbols for pid %d\n", pid);
             return EXIT_FAILURE;
         }
         uint64_t addr = elfsym_lookup(symbol);
         if (addr != 0) {
-            if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
-                    symbol, (unsigned long long)addr);
-            else printf("Resolved '%s' -> 0x%016llx\n", symbol, (unsigned long long)addr);
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"elfresolve\",\"name\":");
+                json_print_escaped((const unsigned char*)symbol, strlen(symbol));
+                printf(",\"addr\":\"0x%016llx\",\"source\":\"elfsym\"}\n", (unsigned long long)addr);
+            } else {
+                if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
+                        symbol, (unsigned long long)addr);
+                else printf("Resolved '%s' -> 0x%016llx\n", symbol, (unsigned long long)addr);
+            }
         } else {
-            fprintf(stderr, "elfresolve: unresolved symbol '%s'\n", symbol);
+            if (g_json) json_err("elfresolve", "unresolved symbol");
+            else fprintf(stderr, "elfresolve: unresolved symbol '%s'\n", symbol);
         }
         elfsym_free();
         return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -471,6 +524,7 @@ int dispatch(int argc, char **argv) {
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
         if (!bytes) {
+            if (g_json) { json_err("write", "invalid hex bytes"); return EXIT_FAILURE; }
             
             if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s Invalid hex bytes\n", S_ERR);
@@ -479,10 +533,17 @@ int dispatch(int argc, char **argv) {
         }
         bool ok = mem_write_region(pid, addr, bytes, blen);
         if (ok) {
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"write\",\"addr\":\"0x%016llx\",\"bytes\":%zu}\n",
+                       (unsigned long long)addr, blen);
+            } else {
             
             if (g_is_tty) printf(A_BOLD A_GREEN);
             printf("  %s Wrote %zu bytes to PID %d at 0x%016llx\n", S_OK, blen, pid, (unsigned long long)addr);
             if (g_is_tty) printf(A_RESET);
+            }
+        } else if (g_json) {
+            json_err("write", "write failed");
         }
         free(bytes);
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -496,10 +557,17 @@ int dispatch(int argc, char **argv) {
         size_t blen = strlen(str);
         bool ok = mem_write_region(pid, addr, str, blen);
         if (ok) {
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"write_str\",\"addr\":\"0x%016llx\",\"bytes\":%zu}\n",
+                       (unsigned long long)addr, blen);
+            } else {
             
             if (g_is_tty) printf(A_BOLD A_GREEN);
             printf("  %s Wrote %zu bytes to PID %d at 0x%016llx\n", S_OK, blen, pid, (unsigned long long)addr);
             if (g_is_tty) printf(A_RESET);
+            }
+        } else if (g_json) {
+            json_err("write_str", "write failed");
         }
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -512,6 +580,14 @@ int dispatch(int argc, char **argv) {
         unsigned char *buf = (unsigned char*)malloc(len);
         bool ok = read_bytes_from_pid(pid, addr, buf, len);
         if (ok) {
+            if (g_json) {
+                printf("{\"ok\":true,\"command\":\"read\",\"addr\":\"0x%016llx\",\"len\":%zu,\"hex\":\"",
+                       (unsigned long long)addr, len);
+                for (size_t i = 0; i < len; i++) printf("%02x", buf[i]);
+                printf("\",\"ascii\":");
+                json_print_escaped(buf, len);
+                printf("}\n");
+            } else {
             
             if (g_is_tty) printf(A_BOLD A_CYAN);
             printf("  %s Reading %zu bytes from PID %d at 0x%016llx\n", S_INFO, len, pid, (unsigned long long)addr);
@@ -520,6 +596,9 @@ int dispatch(int argc, char **argv) {
                 size_t row = len - off < 16 ? len - off : 16;
                 hexdump_line(addr + off, buf + off, row);
             }
+            }
+        } else if (g_json) {
+            json_err("read", "read failed");
         }
         free(buf);
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -532,7 +611,12 @@ int dispatch(int argc, char **argv) {
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = NULL };
         (void)for_each_mapping(pid, search_bytes_in_map_cb, &ctx);
-        if (ctx.found) { printf("%016llx\n", (unsigned long long)ctx.found); return EXIT_SUCCESS; }
+        if (ctx.found) {
+            if (g_json) printf("{\"ok\":true,\"command\":\"search_str\",\"addr\":\"0x%016llx\"}\n", (unsigned long long)ctx.found);
+            else printf("%016llx\n", (unsigned long long)ctx.found);
+            return EXIT_SUCCESS;
+        }
+        if (g_json) json_err("search_str", "not found");
         return EXIT_FAILURE;
     }
 
@@ -542,11 +626,19 @@ int dispatch(int argc, char **argv) {
         const char *hex = argv[3];
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
-        if (!bytes) { fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE; }
+        if (!bytes) {
+            if (g_json) { json_err("search_bytes", "invalid hex bytes"); return EXIT_FAILURE; }
+            fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE;
+        }
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = bytes, .nlen = blen, .seg = seg, .found = 0, .out_all = NULL };
         (void)for_each_mapping(pid, search_bytes_in_map_cb, &ctx);
-        if (ctx.found) { printf("%016llx\n", (unsigned long long)ctx.found); free(bytes); return EXIT_SUCCESS; }
+        if (ctx.found) {
+            if (g_json) printf("{\"ok\":true,\"command\":\"search_bytes\",\"addr\":\"0x%016llx\"}\n", (unsigned long long)ctx.found);
+            else printf("%016llx\n", (unsigned long long)ctx.found);
+            free(bytes); return EXIT_SUCCESS;
+        }
+        if (g_json) json_err("search_bytes", "not found");
         free(bytes);
         return EXIT_FAILURE;
     }
@@ -594,6 +686,15 @@ int dispatch(int argc, char **argv) {
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = stdout };
         (void)for_each_mapping(pid, search_bytes_in_map_cb, &ctx);
+        if (g_json) {
+            printf("{\"ok\":true,\"command\":\"search_all_str\",\"addrs\":[");
+            for (size_t i = 0; i < ctx.naddrs; i++) {
+                if (i) putchar(',');
+                printf("\"0x%016llx\"", (unsigned long long)ctx.addrs[i]);
+            }
+            printf("]}\n");
+            free(ctx.addrs);
+        }
         return EXIT_SUCCESS;
     }
 
@@ -603,11 +704,23 @@ int dispatch(int argc, char **argv) {
         const char *hex = argv[3];
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
-        if (!bytes) { fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE; }
+        if (!bytes) {
+            if (g_json) { json_err("search_all_bytes", "invalid hex bytes"); return EXIT_FAILURE; }
+            fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE;
+        }
         const char *seg = (argc >= 5 ? argv[4] : "any");
         search_ctx_t ctx = { .needle = bytes, .nlen = blen, .seg = seg, .found = 0, .out_all = stdout };
         (void)for_each_mapping(pid, search_bytes_in_map_cb, &ctx);
         free(bytes);
+        if (g_json) {
+            printf("{\"ok\":true,\"command\":\"search_all_bytes\",\"addrs\":[");
+            for (size_t i = 0; i < ctx.naddrs; i++) {
+                if (i) putchar(',');
+                printf("\"0x%016llx\"", (unsigned long long)ctx.addrs[i]);
+            }
+            printf("]}\n");
+            free(ctx.addrs);
+        }
         return EXIT_SUCCESS;
     }
 
