@@ -222,6 +222,35 @@ int dispatch(int argc, char **argv) {
         pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
         const char *symbol = argv[3];
         uint64_t addr = cmd_resolve(pid, symbol, false);
+        if (addr == 0 && elfsym_init(pid) == 0) {
+            addr = elfsym_lookup(symbol);
+            if (addr != 0) {
+                if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx (elfsym)\n" A_RESET,
+                        symbol, (unsigned long long)addr);
+                else printf("Resolved '%s' -> 0x%016llx (elfsym)\n", symbol, (unsigned long long)addr);
+            }
+            elfsym_free();
+        }
+        return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+    if (!strcmp(argv[1], "elfresolve")) {
+        if (argc != 4) { usage(argv[0]); return EXIT_FAILURE; }
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
+        const char *symbol = argv[3];
+        if (elfsym_init(pid) != 0) {
+            fprintf(stderr, "elfresolve: no ELF symbols for pid %d\n", pid);
+            return EXIT_FAILURE;
+        }
+        uint64_t addr = elfsym_lookup(symbol);
+        if (addr != 0) {
+            if (g_is_tty) printf(A_BOLD A_GREEN "  ★ Resolved '%s' -> 0x%016llx\n" A_RESET,
+                    symbol, (unsigned long long)addr);
+            else printf("Resolved '%s' -> 0x%016llx\n", symbol, (unsigned long long)addr);
+        } else {
+            fprintf(stderr, "elfresolve: unresolved symbol '%s'\n", symbol);
+        }
+        elfsym_free();
         return addr != 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
