@@ -4,7 +4,7 @@ bool g_json = false;
 
 /* Emit a JSON string literal for buf[0..len) (escapes quotes/backslashes,
    renders non-printables as '.'). */
-static void json_print_escaped(const unsigned char *buf, size_t len) {
+void json_print_escaped(const unsigned char *buf, size_t len) {
     putchar('"');
     for (size_t i = 0; i < len; i++) {
         unsigned char c = buf[i];
@@ -16,7 +16,7 @@ static void json_print_escaped(const unsigned char *buf, size_t len) {
     putchar('"');
 }
 
-static void json_err(const char *cmd, const char *msg) {
+void json_err(const char *cmd, const char *msg) {
     printf("{\"ok\":false,\"command\":\"%s\",\"error\":\"%s\"}\n", cmd, msg);
 }
 
@@ -197,7 +197,16 @@ int dispatch(int argc, char **argv) {
 
     if (!strcmp(argv[1], "call")) {
         if (argc < 4) { usage(argv[0]); return EXIT_FAILURE; }
-        cmd_call((pid_t)strtoull(argv[2], NULL, 0), strtoull(argv[3], NULL, 16), argc - 4, &argv[4], true);
+        pid_t pid = (pid_t)strtoull(argv[2], NULL, 0);
+        uint64_t addr = strtoull(argv[3], NULL, 16);
+        if (g_json) {
+            uint64_t ret = 0;
+            cmd_call_ret(pid, addr, argc - 4, &argv[4], true, &ret, true);
+            printf("{\"ok\":true,\"command\":\"call\",\"addr\":\"0x%016llx\",\"retval\":\"0x%llx\"}\n",
+                   (unsigned long long)addr, (unsigned long long)ret);
+        } else {
+            cmd_call(pid, addr, argc - 4, &argv[4], true);
+        }
         return EXIT_SUCCESS;
     }
 

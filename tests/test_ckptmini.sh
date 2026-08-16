@@ -569,6 +569,77 @@ else
 fi
 
 #######################################
+# Test 27d: JSON output mode (extended commands)
+#######################################
+info "Test 27d: JSON output mode (extended)"
+
+if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # call returns retval (add_numbers(20,22) == 42 == 0x2a)
+    CALL_JSON=$($CKPTMINI call "$TESTCALL_PID" "$ADDY" 20 22 --json 2>&1)
+    if echo "$CALL_JSON" | jq -e '.ok == true and .retval == "0x2a"' >/dev/null 2>&1; then
+        pass "json - call returns retval"
+    else
+        fail "json - call malformed (output: $CALL_JSON)"
+    fi
+
+    # backtrace returns a frames array
+    BT_JSON=$($CKPTMINI backtrace "$TESTCALL_PID" --json 2>&1)
+    if echo "$BT_JSON" | jq -e '.ok == true and (.frames | type == "array" and length > 0 and .[0].rip != null)' >/dev/null 2>&1; then
+        pass "json - backtrace returns frames array"
+    else
+        fail "json - backtrace malformed (output: $BT_JSON)"
+    fi
+
+    # disas returns an insns array
+    DIS_JSON=$($CKPTMINI disas "$TESTCALL_PID" "$ADDY" 12 --json 2>&1)
+    if echo "$DIS_JSON" | jq -e '.ok == true and (.insns | type == "array" and length > 0 and .[0].mnemonic != null)' >/dev/null 2>&1; then
+        pass "json - disas returns insns array"
+    else
+        fail "json - disas malformed (output: $DIS_JSON)"
+    fi
+
+    # step emits one JSON object per step (JSON Lines)
+    STEP_JSON=$($CKPTMINI step "$TESTCALL_PID" 3 --json 2>&1)
+    if echo "$STEP_JSON" | jq -s -e '(length == 3) and all(.[]; .ok == true and (.rip | startswith("0x")))' >/dev/null 2>&1; then
+        pass "json - step emits one object per step"
+    else
+        fail "json - step malformed (output: $STEP_JSON)"
+    fi
+
+    # show returns maps + regs
+    SHOW_JSON=$($CKPTMINI show "$TESTCALL_PID" --json 2>&1)
+    if echo "$SHOW_JSON" | jq -e '.ok == true and (.maps | length > 0) and (.regs.rip != null)' >/dev/null 2>&1; then
+        pass "json - show returns maps + regs"
+    else
+        fail "json - show malformed (output: $SHOW_JSON)"
+    fi
+else
+    warn "jq missing or test_call not running, skipping extended JSON test"
+fi
+
+# finish --json needs a target stopped inside a returning function (test_finish)
+if command -v jq >/dev/null 2>&1; then
+    "$TESTFINISH" > "$TESTDIR/test_finish_json.txt" 2>&1 &
+    TFJ_PID=$!
+    for i in $(seq 1 100); do
+        grep -q "spinwork started" "$TESTDIR/test_finish_json.txt" 2>/dev/null && break
+        sleep 0.05
+    done
+    if kill -0 "$TFJ_PID" 2>/dev/null; then
+        FIN_JSON=$($CKPTMINI finish "$TFJ_PID" --json 2>&1)
+        if echo "$FIN_JSON" | jq -e '.ok == true and .symbol == "spinwork" and .retval == "0x2a"' >/dev/null 2>&1; then
+            pass "json - finish returns symbol + retval"
+        else
+            fail "json - finish malformed (output: $FIN_JSON)"
+        fi
+        kill -9 "$TFJ_PID" 2>/dev/null || true
+        wait "$TFJ_PID" 2>/dev/null || true
+    else
+        warn "test_finish not running, skipping finish JSON test"
+    fi
+fi
+
+#######################################
 # TEST 28: Upload string to remote process (needs root)
 #######################################
 info "Test 28: upload --str command"

@@ -739,37 +739,63 @@ void cmd_disas(pid_t pid, uint64_t addr, size_t len, bool syms) {
         syms = false;
     }
 
-    if (g_is_tty) printf(A_BOLD A_CYAN);
-    printf("  Disassembling %zu bytes at 0x%016llx (PID %d)\n", len, (unsigned long long)addr, pid);
-    if (g_is_tty) printf(A_RESET);
+    if (g_json) {
+        printf("{\"ok\":true,\"command\":\"disas\",\"addr\":\"0x%016llx\",\"len\":%zu,\"insns\":[",
+               (unsigned long long)addr, len);
+    } else {
+        if (g_is_tty) printf(A_BOLD A_CYAN);
+        printf("  Disassembling %zu bytes at 0x%016llx (PID %d)\n", len, (unsigned long long)addr, pid);
+        if (g_is_tty) printf(A_RESET);
+    }
 
     symstate_t symst = { 0 };
     size_t off = 0;
+    bool first_insn = true;
     while (off < len) {
-        if (syms) sym_header(&symst, addr + off);
+        if (syms && !g_json) sym_header(&symst, addr + off);
         cs_insn *insn = NULL;
         size_t count = cs_disasm(handle, buf + off, len - off, addr + off, 1, &insn);
         if (count == 0) {
-            if (g_is_tty) printf(A_DIM);
-            printf("  0x%016llx:  %02x", (unsigned long long)(addr + off), buf[off]);
-            pad_bytes_col(1);
-            if (g_is_tty) printf(A_RESET);
-            printf("<invalid>\n");
+            if (g_json) {
+                if (!first_insn) putchar(',');
+                first_insn = false;
+                printf("{\"addr\":\"0x%016llx\",\"bytes\":\"%02x\",\"mnemonic\":\"<invalid>\"}",
+                       (unsigned long long)(addr + off), buf[off]);
+            } else {
+                if (g_is_tty) printf(A_DIM);
+                printf("  0x%016llx:  %02x", (unsigned long long)(addr + off), buf[off]);
+                pad_bytes_col(1);
+                if (g_is_tty) printf(A_RESET);
+                printf("<invalid>\n");
+            }
             off++;
             continue;
         }
-        printf("  0x%016llx:  ", (unsigned long long)(addr + off));
-        for (size_t i = 0; i < insn[0].size; i++) printf("%02x ", buf[off + i]);
-        pad_bytes_col(insn[0].size);
-        if (g_is_tty) printf(A_GREEN);
-        printf("%s", insn[0].mnemonic);
-        if (g_is_tty) printf(A_RESET);
-        if (insn[0].op_str[0]) printf(" %s", insn[0].op_str);
-        printf("\n");
+        if (g_json) {
+            if (!first_insn) putchar(',');
+            first_insn = false;
+            printf("{\"addr\":\"0x%016llx\",\"bytes\":\"", (unsigned long long)(addr + off));
+            for (size_t i = 0; i < insn[0].size; i++) printf("%02x", buf[off + i]);
+            printf("\",\"mnemonic\":");
+            json_print_escaped((const unsigned char*)insn[0].mnemonic, strlen(insn[0].mnemonic));
+            printf(",\"op_str\":");
+            json_print_escaped((const unsigned char*)insn[0].op_str, strlen(insn[0].op_str));
+            printf("}");
+        } else {
+            printf("  0x%016llx:  ", (unsigned long long)(addr + off));
+            for (size_t i = 0; i < insn[0].size; i++) printf("%02x ", buf[off + i]);
+            pad_bytes_col(insn[0].size);
+            if (g_is_tty) printf(A_GREEN);
+            printf("%s", insn[0].mnemonic);
+            if (g_is_tty) printf(A_RESET);
+            if (insn[0].op_str[0]) printf(" %s", insn[0].op_str);
+            printf("\n");
+        }
         off += insn[0].size;
         cs_free(insn, count);
     }
 
+    if (g_json) printf("]}\n");
     cs_close(&handle);
     if (syms) elfsym_free();
     free(buf);
@@ -1261,12 +1287,13 @@ static void arm_return_bp(pid_t pid, uint64_t ret_addr, int fbp_idx, unsigned lo
 /* Handle a return-address breakpoint hit: pop the matching pending return,
    print the value in rax, then restore-single-step-rearm like handle_fbp_hit.
    Registers keep the post-return state; only RIP is rewound past the int3. */
-static int handle_rbp_hit(pid_t pid, int ridx) {
+static int handle_rbp_hit(pid_t pid, int ridx, uint64_t *ret_out) {
     rbp_t *r = &g_rbps[ridx];
 
     regs_t regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) return 0;
     uint64_t rax = regs.rax;
+    if (ret_out) *ret_out = rax;
 
     int fbp_idx = 0;
     unsigned long long call_no = 0;
@@ -1289,15 +1316,17 @@ static int handle_rbp_hit(pid_t pid, int ridx) {
 
     const char *name = g_fbps[fbp_idx].name;
     symres_t sr = elfsym_resolve(rax);
-    if (g_is_tty) {
-        printf(A_CYAN "[%06llu]" A_RESET " %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
-        if (sr.found) printf(A_DIM "  (%s+0x%llx)" A_RESET, sr.name, (unsigned long long)sr.delta);
-    } else {
-        printf("[%06llu] %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
-        if (sr.found) printf("  (%s+0x%llx)", sr.name, (unsigned long long)sr.delta);
+    if (!(ret_out && g_json)) {
+        if (g_is_tty) {
+            printf(A_CYAN "[%06llu]" A_RESET " %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
+            if (sr.found) printf(A_DIM "  (%s+0x%llx)" A_RESET, sr.name, (unsigned long long)sr.delta);
+        } else {
+            printf("[%06llu] %s() -> 0x%llx", call_no, name, (unsigned long long)rax);
+            if (sr.found) printf("  (%s+0x%llx)", sr.name, (unsigned long long)sr.delta);
+        }
+        printf("\n");
+        fflush(stdout);
     }
-    printf("\n");
-    fflush(stdout);
 
     /* Restore the original byte and re-point RIP at the return site: the int3
        advanced RIP past the breakpoint byte, so step back to re-execute the
@@ -1529,7 +1558,7 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
             if (g_rbps[i].armed && g_rbps[i].addr == bp) { ridx = i; break; }
         }
         if (ridx >= 0) {
-            deliver = handle_rbp_hit(pid, ridx);
+            deliver = handle_rbp_hit(pid, ridx, NULL);
             if (g_interrupt) break;   /* Ctrl+C landed during the single-step dance */
             continue;
         }
@@ -1681,14 +1710,16 @@ void cmd_finish(pid_t pid) {
         snprintf(fname, sizeof(fname), "<unknown@0x%llx>", (unsigned long long)regs.rip);
     }
 
-    if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Finish" A_RESET);
-    else printf("Finish");
-    if (cur.found && cur.delta)
-        printf(": running %s+0x%llx", fname, (unsigned long long)cur.delta);
-    else
-        printf(": running %s", fname);
-    printf(" until it returns (ret addr 0x%016llx). Ctrl+C to abort.\n",
-           (unsigned long long)ret_addr);
+    if (!g_json) {
+        if (g_is_tty) printf(A_BOLD A_YELLOW "  ◆ Finish" A_RESET);
+        else printf("Finish");
+        if (cur.found && cur.delta)
+            printf(": running %s+0x%llx", fname, (unsigned long long)cur.delta);
+        else
+            printf(": running %s", fname);
+        printf(" until it returns (ret addr 0x%016llx). Ctrl+C to abort.\n",
+               (unsigned long long)ret_addr);
+    }
 
     /* Arm a single return-address breakpoint through the same machinery ftrace's
        -r uses: one pending return, reported via g_fbps[0].name. */
@@ -1709,6 +1740,8 @@ void cmd_finish(pid_t pid) {
 
     int deliver = 0;
     bool running = false;
+    bool json_done = false;
+    uint64_t finish_ret = 0;
     while (!g_interrupt) {
         if (ptrace(PTRACE_CONT, pid, NULL, (void*)(long)deliver) == -1) break;
         deliver = 0;
@@ -1721,11 +1754,13 @@ void cmd_finish(pid_t pid) {
         running = false;
 
         if (WIFEXITED(st)) {
-            printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
+            if (g_json) { json_err("finish", "process exited"); json_done = true; }
+            else printf("Process %d exited (status %d).\n", pid, WEXITSTATUS(st));
             break;
         }
         if (WIFSIGNALED(st)) {
-            printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
+            if (g_json) { json_err("finish", "process killed by signal"); json_done = true; }
+            else printf("Process %d killed by signal %d.\n", pid, WTERMSIG(st));
             break;
         }
         if (!WIFSTOPPED(st)) continue;
@@ -1734,8 +1769,10 @@ void cmd_finish(pid_t pid) {
         if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
 
         if (sig != SIGTRAP) {
-            if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
-            else printf("(stopped by signal %d)\n", sig);
+            if (!g_json) {
+                if (g_is_tty) printf(A_DIM "  (stopped by signal %d)\n" A_RESET, sig);
+                else printf("(stopped by signal %d)\n", sig);
+            }
             deliver = sig;   /* let the target's handler see it */
             continue;
         }
@@ -1748,15 +1785,17 @@ void cmd_finish(pid_t pid) {
             if (g_rbps[i].armed && g_rbps[i].addr == bp) { ridx = i; break; }
         }
         if (ridx >= 0) {
-            /* Function returned: print the value in rax, then restore/single-step. */
-            (void)handle_rbp_hit(pid, ridx);
+            /* Function returned: capture rax, then restore/single-step. */
+            (void)handle_rbp_hit(pid, ridx, &finish_ret);
             break;
         }
 
         /* Not one of ours: deliver the stray SIGTRAP. */
-        if (g_is_tty) printf(A_DIM "  (unexpected SIGTRAP at 0x%llx, delivered)\n" A_RESET,
-                             (unsigned long long)regs.rip);
-        else printf("(unexpected SIGTRAP at 0x%llx, delivered)\n", (unsigned long long)regs.rip);
+        if (!g_json) {
+            if (g_is_tty) printf(A_DIM "  (unexpected SIGTRAP at 0x%llx, delivered)\n" A_RESET,
+                                 (unsigned long long)regs.rip);
+            else printf("(unexpected SIGTRAP at 0x%llx, delivered)\n", (unsigned long long)regs.rip);
+        }
         deliver = SIGTRAP;
     }
 
@@ -1780,7 +1819,17 @@ void cmd_finish(pid_t pid) {
     }
     tracee_detach(pid, NULL);
 
-    if (g_interrupt) {
+    if (g_json) {
+        if (!json_done) {
+            if (g_interrupt) json_err("finish", "aborted (interrupted)");
+            else {
+                printf("{\"ok\":true,\"command\":\"finish\",\"symbol\":");
+                json_print_escaped((const unsigned char*)fname, strlen(fname));
+                printf(",\"addr\":\"0x%016llx\",\"retval\":\"0x%llx\"}\n",
+                       (unsigned long long)ret_addr, (unsigned long long)finish_ret);
+            }
+        }
+    } else if (g_interrupt) {
         if (g_is_tty) printf(A_GREEN "  ★ Aborted finish on PID %d (detached; process continues).\n" A_RESET, pid);
         else printf("Aborted finish on PID %d (detached; process continues).\n", pid);
     } else {
@@ -1832,27 +1881,49 @@ void cmd_backtrace(pid_t pid, bool pause) {
         return;
     }
 
-    if (g_is_tty) printf(A_BOLD A_CYAN "  ◆ Backtrace for PID %d\n" A_RESET, pid);
-    else printf("Backtrace for PID %d\n", pid);
+    if (g_json) {
+        printf("{\"ok\":true,\"command\":\"backtrace\",\"frames\":[");
+    } else if (g_is_tty) {
+        printf(A_BOLD A_CYAN "  ◆ Backtrace for PID %d\n" A_RESET, pid);
+    } else {
+        printf("Backtrace for PID %d\n", pid);
+    }
 
     uint64_t rbp = regs.rbp;
     uint64_t rip = regs.rip;
     int frame = 0;
+    bool first = true;
 
     while (frame < 20) {
-        printf("  #%-2d %016llx", frame++, (unsigned long long)rip);
+        char modname[512] = "";
         procmaps_iterator *it = parse_maps_live(pid);
         if (it) {
             procmaps_struct *map;
             while ((map = pmparser_next(it)) != NULL) {
                 if (rip >= (uint64_t)map->addr_start && rip < (uint64_t)map->addr_end) {
-                    printf(" in %s", map->pathname && map->pathname[0] ? map->pathname : "[anon]");
+                    const char *p = (map->pathname && map->pathname[0]) ? map->pathname : "[anon]";
+                    snprintf(modname, sizeof(modname), "%s", p);
                     break;
                 }
             }
             pmparser_free(it);
         }
-        printf("\n");
+
+        if (g_json) {
+            if (!first) putchar(',');
+            first = false;
+            printf("{\"n\":%d,\"rip\":\"0x%016llx\"", frame, (unsigned long long)rip);
+            if (modname[0]) {
+                printf(",\"module\":");
+                json_print_escaped((const unsigned char*)modname, strlen(modname));
+            }
+            putchar('}');
+        } else {
+            printf("  #%-2d %016llx", frame, (unsigned long long)rip);
+            if (modname[0]) printf(" in %s", modname);
+            printf("\n");
+        }
+        frame++;
 
         if (rbp == 0) break;
 
@@ -1866,6 +1937,7 @@ void cmd_backtrace(pid_t pid, bool pause) {
         rip = next_rip;
     }
 
+    if (g_json) printf("]}\n");
     tracee_detach(pid, (void*)(pause ? (long)SIGSTOP : 0));
 }
 
@@ -2153,8 +2225,10 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
         }
     } else {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
-        printf("  ⚠ Call stopped unexpectedly: status=0x%x, sig=%d\n", st, WIFSTOPPED(st) ? WSTOPSIG(st) : 0);
-        printf("  RIP: %016llx, RSP: %016llx\n", (unsigned long long)regs.rip, (unsigned long long)regs.rsp);
+        if (!quiet) {
+            printf("  ⚠ Call stopped unexpectedly: status=0x%x, sig=%d\n", st, WIFSTOPPED(st) ? WSTOPSIG(st) : 0);
+            printf("  RIP: %016llx, RSP: %016llx\n", (unsigned long long)regs.rip, (unsigned long long)regs.rsp);
+        }
         fflush(stdout);
     }
 

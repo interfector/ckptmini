@@ -156,6 +156,15 @@ Commands that currently support `--json`:
 | `read` | `{"ok":true,"addr":"0x...","len":N,"hex":"...","ascii":"..."}` |
 | `write` / `write_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
 | `resolve` / `elfresolve` | `{"ok":true,"name":"...","addr":"0x...","source":"dlsym\|elfsym"}` |
+| `call` | `{"ok":true,"addr":"0x...","retval":"0x..."}` |
+| `backtrace` | `{"ok":true,"frames":[{"n":N,"rip":"0x...","module":"..."},...]}` |
+| `disas` | `{"ok":true,"addr":"0x...","len":N,"insns":[{"addr","bytes","mnemonic","op_str"},...]}` |
+| `finish` | `{"ok":true,"symbol":"...","addr":"0x...","retval":"0x..."}` |
+| `show` / `show_dump` | `{"ok":true,"maps":[{"start","end","perms","offset","dev","inode","path"},...],"regs":{...}}` |
+| `step` | one object per step (JSON Lines): `{"ok":true,"step":N,"rip":"0x...","rsp","rbp","rax","rbx","rcx","rdx"}` |
+
+`step` emits one object per step (JSON Lines) so scripts can follow execution.
+All other `--json` commands emit a single JSON object.
 
 On failure the object is `{"ok":false,"command":"...","error":"..."}` and the
 exit code is non-zero.

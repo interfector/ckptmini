@@ -196,6 +196,13 @@ extern bool g_is_tty;
  */
 extern bool g_json;
 
+/* Emit a JSON string literal for buf[0..len) (escapes quotes/backslashes,
+   renders non-printables as '.'). */
+void json_print_escaped(const unsigned char *buf, size_t len);
+
+/* Emit a JSON error object {"ok":false,"command":...,"error":...}. */
+void json_err(const char *cmd, const char *msg);
+
 /**
  * @brief Global flag: set to 1 by SIGINT handler to stop a tracing loop
  */
