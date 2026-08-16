@@ -187,16 +187,20 @@ Example - spawn a shell:
 |---------|-------------|
 | `call <pid> <addr> [args]` | Call function at address with arguments |
 | `load_so <pid> <path>` | Load shared library into process |
-| `resolve <pid> <symbol>` | Resolve symbol address using dlsym |
+| `resolve <pid> <symbol>` | Resolve symbol address using dlsym (falls back to the ELF table if dlsym can't see it) |
+| `elfresolve <pid> <symbol>` | Resolve symbol address from the target's ELF symbol table (covers static `.symtab` symbols dlsym can't see) |
 | `upload <pid> <hex> [perms]` | Upload bytes to remote process memory |
 | `upload <pid> --str <string> [perms]` | Upload string to remote process memory |
 
-`load_so` and `resolve` use `dlopen`/`dlsym` internally to inject libraries or resolve symbols.
+`load_so` and `resolve` use `dlopen`/`dlsym` internally to inject libraries or resolve symbols. `elfresolve` instead reads the target's `/proc/<pid>/maps` and ELF symbol tables on disk, so it needs no injection and can resolve static symbols like `main`.
 
 **Usage examples:**
 ```bash
 # Resolve a symbol address
 ./ckptmini resolve 12345 system
+
+# Resolve a static symbol address via the ELF symbol table
+./ckptmini elfresolve 12345 main
 
 # Upload a string to remote process
 ./ckptmini upload 12345 --str "/bin/sh"

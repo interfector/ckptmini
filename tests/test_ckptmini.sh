@@ -471,6 +471,42 @@ else
 fi
 
 #######################################
+# Test 27b: elfresolve command (ELF symbol table)
+#######################################
+info "Test 27b: elfresolve command"
+
+if kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    RESULT=$($CKPTMINI elfresolve "$TESTCALL_PID" add_numbers 2>&1)
+    echo "$RESULT"
+
+    if echo "$RESULT" | grep -q "Resolved 'add_numbers'"; then
+        pass "elfresolve - resolved add_numbers symbol"
+    else
+        fail "elfresolve - failed for add_numbers (output: $RESULT)"
+    fi
+
+    RESULT2=$($CKPTMINI elfresolve "$TESTCALL_PID" main 2>&1)
+    echo "$RESULT2"
+
+    if echo "$RESULT2" | grep -q "Resolved 'main'"; then
+        pass "elfresolve - resolved main symbol"
+    else
+        fail "elfresolve - failed for main (output: $RESULT2)"
+    fi
+
+    RESULT3=$($CKPTMINI elfresolve "$TESTCALL_PID" definitely_missing 2>&1)
+    echo "$RESULT3"
+
+    if echo "$RESULT3" | grep -q "unresolved symbol"; then
+        pass "elfresolve - reports missing symbols"
+    else
+        fail "elfresolve - expected unresolved for missing symbol (output: $RESULT3)"
+    fi
+else
+    warn "test_call not running, skipping elfresolve test"
+fi
+
+#######################################
 # TEST 28: Upload string to remote process (needs root)
 #######################################
 info "Test 28: upload --str command"
@@ -774,6 +810,27 @@ TESTSTATIC_PID=$!
 sleep 0.5
 
 if kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
+    # static_add is only in .symtab (not .dynsym), so dlsym cannot see it but
+    # elfresolve reads the ELF symbol table directly.
+    STATIC_RES=$($CKPTMINI elfresolve "$TESTSTATIC_PID" static_add 2>&1)
+    echo "$STATIC_RES"
+
+    if echo "$STATIC_RES" | grep -q "Resolved 'static_add'"; then
+        pass "elfresolve resolves static symbol (dlsym-invisible)"
+    else
+        fail "elfresolve - failed for static_add (output: $STATIC_RES)"
+    fi
+
+    # resolve should fall back to the ELF table when dlsym cannot see the symbol
+    RESOLVE_STATIC=$($CKPTMINI resolve "$TESTSTATIC_PID" static_add 2>&1)
+    echo "$RESOLVE_STATIC"
+
+    if echo "$RESOLVE_STATIC" | grep -q "Resolved 'static_add'"; then
+        pass "resolve falls back to elfsym for static symbols"
+    else
+        fail "resolve - no elfsym fallback for static_add (output: $RESOLVE_STATIC)"
+    fi
+
     # static_add is only in .symtab, so this exercises the elfsym fallback.
     $CKPTMINI ftrace "$TESTSTATIC_PID" static_add -r > "$TESTDIR/ftrace_static.txt" 2>&1 &
     FTRACE_PID=$!
