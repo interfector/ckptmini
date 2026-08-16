@@ -9,8 +9,8 @@ PARASITE = parasite.elf
 PARASITE_BIN = parasite.bin
 PARASITE_OBJ = parasite_blob.o
 
-TEST_TARGETS = tests/test_loop tests/test_call tests/test_thread tests/test_collider tests/test_static tests/test_finish tests/test_leaf
-TEST_SOURCES = tests/test_loop.c tests/test_call.c tests/test_thread.c tests/test_collider.c tests/test_static.c tests/test_finish.c tests/test_leaf.c
+TEST_TARGETS = tests/test_loop tests/test_call tests/test_thread tests/test_collider tests/test_static tests/test_finish tests/test_leaf tests/test_bp
+TEST_SOURCES = tests/test_loop.c tests/test_call.c tests/test_thread.c tests/test_collider.c tests/test_static.c tests/test_finish.c tests/test_leaf.c tests/test_bp.c
 TEST_OBJS = $(TEST_SOURCES:.c=.o)
 
 TESTLIB = testlib.so
@@ -40,7 +40,7 @@ parasite: $(PARASITE_BIN)
 
 test: $(TEST_TARGETS) $(TESTLIB) $(HIJACKLIB)
 
-tests: all test_loop test_call test_thread test_static test_finish test_leaf $(TESTLIB) $(HIJACKLIB)
+tests: all test_loop test_call test_thread test_static test_finish test_leaf test_bp $(TESTLIB) $(HIJACKLIB)
 	./tests/test_ckptmini.sh
 	./tests/test_shell.sh
 
@@ -70,6 +70,9 @@ test_finish: tests/test_finish.o
 
 test_leaf: tests/test_leaf.o
 	$(CC) $< -o tests/test_leaf
+
+test_bp: tests/test_bp.o
+	$(CC) $< -o tests/test_bp
 
 # test_leaf must be -O2 so hotloop is a frameless leaf while main keeps its
 # frame pointer (via the optimize() attribute on main).

@@ -11,6 +11,7 @@ NC='\033[0m'
 
 CKPTMINI="$(cd "$(dirname "$0")/.." && pwd)/ckptmini"
 TESTLOOP="$(cd "$(dirname "$0")" && pwd)/test_loop"
+TESTBP="$(cd "$(dirname "$0")" && pwd)/test_bp"
 TPID=""
 
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
@@ -150,6 +151,82 @@ if [ -x "$TESTLOOP" ]; then
     TPID=""
 else
     warn "test_loop not built; skipping live-target tests"
+fi
+
+info "Shell: persistent breakpoints"
+if [ -x "$TESTBP" ]; then
+    "$TESTBP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.5
+
+    OUT=$(printf 'attach %d\nbreak tick\ncontinue\nexpr $rip\nexpr $rdi\ncontinue\nexpr $rdi\ninfo break\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
+    BPADDR=$(echo "$OUT" | grep '^breakpoint 1 at ' | sed -n 's/.*at 0x0*\([0-9a-f]*\).*/\1/p')
+    if echo "$OUT" | grep -q "Breakpoint 1 hit" && \
+       echo "$OUT" | grep -q "breakpoint 1: .*  idle  2 hits" && \
+       [ -n "$BPADDR" ] && echo "$OUT" | grep -q "^0x$BPADDR$" && \
+       echo "$OUT" | grep -q "^0x[0-9a-f][0-9a-f]*$"; then
+        pass "breakpoint hits, \$rip at bp address, repeated continue works"
+    else
+        fail "unconditional breakpoint (bp=$BPADDR output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+
+    "$TESTBP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.5
+    OUT=$(printf 'attach %d\nbreak tick if $rdi >= 0x30\ncontinue\nexpr $rdi\ncontinue\nexpr $rdi\ninfo break\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q "Breakpoint 1 hit" && \
+       echo "$OUT" | grep -q "if \$rdi >= 0x30" && \
+       echo "$OUT" | grep -q "breakpoint 1: .*  idle  2 hits.*if \$rdi >= 0x30" && \
+       ! echo "$OUT" | grep -q "condition false, continuing"; then
+        pass "conditional breakpoint steps over false hits, stops on true, no flood"
+    else
+        fail "conditional breakpoint (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+
+    "$TESTBP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.5
+    OUT=$(printf 'attach %d\nbreak tick\ncontinue\ndel 1\ninfo break\ncontinue\nquit\n' "$TPID" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q "breakpoint 1 removed" && \
+       echo "$OUT" | grep -q "no breakpoints" && \
+       echo "$OUT" | grep -q "released held pid"; then
+        pass "del removes a breakpoint, continue releases the hold cleanly"
+    else
+        fail "del/continue (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+
+    "$TESTBP" >/dev/null 2>&1 &
+    TPID=$!
+    sleep 0.5
+    OUT=$(printf 'attach %d\nbreak tick\ncontinue\ndetach\nattach %d\ninfo break\ncontinue\ninfo break\nquit\n' "$TPID" "$TPID" | "$CKPTMINI" -i 2>&1)
+    if echo "$OUT" | grep -q "breakpoint 1: .*  1 hit" && \
+       echo "$OUT" | grep -q "Breakpoint 1 hit" && \
+       echo "$OUT" | grep -q "breakpoint 1: .*  2 hits"; then
+        pass "breakpoint persists and re-arms across detach/re-attach"
+    else
+        fail "detach/re-attach persistence (output: $(echo "$OUT" | tr '\n' '|'))"
+    fi
+
+    if kill -0 "$TPID" 2>/dev/null; then
+        pass "target survives breakpoint attach/continue/detach cycles"
+    else
+        fail "target died during breakpoint cycles"
+    fi
+
+    kill -9 "$TPID" 2>/dev/null || true
+    wait "$TPID" 2>/dev/null || true
+    TPID=""
+else
+    echo -e "${YELLOW}[INFO]${NC} test_bp not built; skipping breakpoint tests"
 fi
 
 info "Shell: help and quit"

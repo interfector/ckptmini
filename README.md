@@ -151,7 +151,7 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
 Register names: rip, rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15.
 
-**Limitations:** Breakpoints are single-shot; they are removed after triggering.
+**Limitations:** The CLI `breakpoint` command is single-shot; it is removed after triggering. The interactive shell (`-i`) instead keeps persistent breakpoints (`break <addr|sym> [if <expr>]`), which survive across detach/re-attach and can be listed with `info break`, deleted with `del <n>` / `clear <addr>`, and driven with `continue`.
 
 ### Code Injection
 
