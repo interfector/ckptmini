@@ -103,13 +103,13 @@ void cmd_dump(const char *arg) {
 
     if (is_live) {
         pid_t pid = (pid_t)atoi(arg);
-        bool attached = (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == 0);
+        bool attached = (tracee_attach(pid) == 0);
         if (attached) {
-            int st; waitpid(pid, &st, 0);
+            int st; tracee_wait(pid, &st);
         }
         if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == 0) got_regs = true;
         if (attached) {
-            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            tracee_detach(pid, NULL);
         }
     } else {
         char rpath[512]; snprintf(rpath, sizeof(rpath), "%s/regs.bin", arg);
@@ -226,16 +226,16 @@ void cmd_watch(pid_t pid, uint64_t addr, size_t len, unsigned int interval_ms) {
 void cmd_snapshot_diff(pid_t pid, const char *indir) {
     
 
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "snapshot_diff: permission denied (need root)\n"); return; }
         else if (errno == ESRCH) { fprintf(stderr, "snapshot_diff: no such process %d\n", pid); return; }
         else DIE("PTRACE_ATTACH snapshot_diff");
     }
-    int st; waitpid(pid, &st, __WALL);
+    int st; tracee_wait(pid, &st);
 
     char memdir[512]; snprintf(memdir, sizeof(memdir), "%s/mem", indir);
     DIR *d = opendir(memdir);
-    if (!d) { ptrace(PTRACE_DETACH, pid, NULL, NULL); perror("opendir mem"); return; }
+    if (!d) { tracee_detach(pid, NULL); perror("opendir mem"); return; }
 
     if (g_is_tty) printf(A_BOLD A_CYAN);
     printf("  Snapshot diff: PID %d  vs  %s\n", pid, indir);
@@ -330,7 +330,7 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
         free(saved); free(live);
     }
     closedir(d);
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 
     char totbuf[16]; hr_size((uint64_t)total_diff, totbuf, sizeof(totbuf));
     printf("\n");
@@ -343,7 +343,7 @@ void cmd_snapshot_diff(pid_t pid, const char *indir) {
 
 void cmd_breakpoint(pid_t pid, uint64_t addr) {
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "breakpoint: permission denied (need root)\n"); return; }
         else if (errno == ESRCH) { fprintf(stderr, "breakpoint: no such process %d\n", pid); return; }
         else DIE("PTRACE_ATTACH breakpoint");
@@ -353,7 +353,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
     errno = 0;
     long orig_word = ptrace(PTRACE_PEEKTEXT, pid, (void*)addr, NULL);
     if (orig_word == -1 && errno) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         fprintf(stderr, "breakpoint: could not read address 0x%016llx\n", (unsigned long long)addr);
         return;
     }
@@ -361,7 +361,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
 
     long bp_word = (orig_word & ~0xFFL) | 0xCCL;
     if (ptrace(PTRACE_POKETEXT, pid, (void*)addr, (void*)bp_word) == -1) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         fprintf(stderr, "breakpoint: could not write INT3 at 0x%016llx (is it read-only?)\n", (unsigned long long)addr);
         return;
     }
@@ -384,7 +384,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
         if (g_is_tty) printf(A_BOLD A_GREEN "\n  ★ Breakpoint HIT at 0x%016llx\n" A_RESET, (unsigned long long)regs.rip);
         else printf("\nBreakpoint HIT at 0x%016llx\n", (unsigned long long)regs.rip);
 
-        ptrace(PTRACE_DETACH, pid, NULL, (void*)SIGSTOP);
+        tracee_detach(pid, (void*)SIGSTOP);
 
         char pidstr[32]; snprintf(pidstr, sizeof(pidstr), "%d", pid);
         cmd_dump(pidstr);
@@ -395,7 +395,7 @@ void cmd_breakpoint(pid_t pid, uint64_t addr) {
         printf("Process stopped for non-trap reason (status=0x%x, sig=%d). Original byte restored.\n", st, WIFSTOPPED(st) ? WSTOPSIG(st) : 0);
     }
 
-    ptrace(PTRACE_DETACH, pid, NULL, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
+        tracee_detach(pid, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
 }
 
 /**
@@ -419,7 +419,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
     if (!shellcode) { fprintf(stderr, "inject_shellcode: invalid hex strings\n"); return; }
 
     /* Attach to target process */
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "inject: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "inject: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH inject");
@@ -437,7 +437,7 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
     uint64_t pocket = (uint64_t)remote_syscall_x64(pid, __NR_mmap, 0, 4096, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)pocket < 0) {
         fprintf(stderr, "inject: remote mmap failed (ret=%ld)\n", (long)pocket);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL); free(shellcode); return;
+        tracee_detach(pid, NULL); free(shellcode); return;
     }
 
     /* Step 2: Copy shellcode to buffer, append int3 breakpoint */
@@ -497,13 +497,13 @@ void cmd_inject_shellcode(pid_t pid, const char *hex) {
     (void)remote_syscall_x64(pid, __NR_munmap, pocket, 4096, 0, 0, 0, 0);
 
     /* Step 7: Detach, preserving signal state if needed */
-    ptrace(PTRACE_DETACH, pid, NULL, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
+        tracee_detach(pid, (void*)((WIFSTOPPED(st) && WSTOPSIG(st) != SIGTRAP) ? (long)WSTOPSIG(st) : 0));
     free(shellcode); free(payload);
 }
 
 void cmd_trace(pid_t pid) {
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "trace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "trace: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH trace");
@@ -517,9 +517,9 @@ void cmd_trace(pid_t pid) {
     else printf("Tracing syscalls for PID %d...\n", pid);
 
     bool in_syscall = false;
-    while (1) {
+    while (!g_interrupt) {
         if (ptrace(PTRACE_SYSCALL, pid, NULL, NULL) == -1) break;
-        waitpid(pid, &st, __WALL);
+        if (waitpid_eintr(pid, &st) == -1) break;
 
         if (WIFEXITED(st)) {
             printf("Process %d exited.\n", pid);
@@ -532,7 +532,8 @@ void cmd_trace(pid_t pid) {
 
         if (WIFSTOPPED(st) && WSTOPSIG(st) == (SIGTRAP | 0x80)) {
             regs_t regs;
-            if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) break;
+            errno = 0;
+            if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { fprintf(stderr, "[dbg] GETREGS err=%d %s (in_syscall=%d)\n", errno, strerror(errno), in_syscall); break; }
 
             if (!in_syscall) {
                 if (g_is_tty) printf(A_CYAN "  [entry]" A_RESET " syscall(%lld) args: %016llx %016llx %016llx\n",
@@ -551,7 +552,7 @@ void cmd_trace(pid_t pid) {
             else printf("(stopped by signal %d)\n", WSTOPSIG(st));
         }
     }
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 }
 
 /* ---------------- instruction (single-step) tracing ---------------- */
@@ -595,7 +596,7 @@ static void print_retval(uint64_t rax) {
 
 void cmd_itrace(pid_t pid, bool disasm, bool syms) {
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "itrace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "itrace: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH itrace");
@@ -604,7 +605,7 @@ void cmd_itrace(pid_t pid, bool disasm, bool syms) {
     int st;
     if (waitpid_eintr(pid, &st) == -1) {
         perror("itrace: waitpid attach");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -704,7 +705,7 @@ void cmd_itrace(pid_t pid, bool disasm, bool syms) {
     }
 
     /* Detach with signal 0: the tracee resumes without any pending SIGTRAP. */
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 
     if (g_interrupt) {
         if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
@@ -820,7 +821,7 @@ static void print_calltrace_line(unsigned long long count, int depth,
 }
 
 void cmd_calltrace(pid_t pid, bool syms) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "calltrace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "calltrace: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH calltrace");
@@ -829,7 +830,7 @@ void cmd_calltrace(pid_t pid, bool syms) {
     int st;
     if (waitpid_eintr(pid, &st) == -1) {
         perror("calltrace: waitpid attach");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -842,7 +843,7 @@ void cmd_calltrace(pid_t pid, bool syms) {
     csh handle;
     if (!disas_open(&handle)) {
         fprintf(stderr, "calltrace: capstone init failed\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
@@ -909,7 +910,7 @@ void cmd_calltrace(pid_t pid, bool syms) {
     }
 
     /* Detach with signal 0: the tracee resumes without any pending SIGTRAP. */
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 
     if (g_interrupt) {
         if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
@@ -1451,7 +1452,7 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     }
     if (g_nfbps == 0) { fprintf(stderr, "ftrace: no resolvable symbols\n"); return; }
 
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "ftrace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "ftrace: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH ftrace");
@@ -1460,7 +1461,7 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     int st;
     if (waitpid_eintr(pid, &st) == -1) {
         perror("ftrace: waitpid attach");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1483,7 +1484,7 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
     }
     if (armed == 0) {
         fprintf(stderr, "ftrace: could not arm any breakpoints\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1572,7 +1573,7 @@ void cmd_ftrace(pid_t pid, int nnames, char **names, bool retval) {
         ptrace(PTRACE_POKETEXT, pid, (void*)g_rbps[i].addr, (void*)nw);
         g_rbps[i].armed = false;
     }
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 
     if (g_interrupt) {
         if (g_is_tty) printf(A_GREEN "  ★ Stopped tracing PID %d (detached; process continues).\n" A_RESET, pid);
@@ -1639,7 +1640,7 @@ static uint64_t find_return_address(pid_t pid, const regs_t *regs) {
 }
 
 void cmd_finish(pid_t pid) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "finish: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "finish: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH finish");
@@ -1648,7 +1649,7 @@ void cmd_finish(pid_t pid) {
     int st;
     if (waitpid_eintr(pid, &st) == -1) {
         perror("finish: waitpid attach");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1659,14 +1660,14 @@ void cmd_finish(pid_t pid) {
     regs_t regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
         perror("finish: PTRACE_GETREGS");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
     uint64_t ret_addr = find_return_address(pid, &regs);
     if (ret_addr == 0) {
         fprintf(stderr, "finish: could not find the current frame's return address on the stack\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1702,7 +1703,7 @@ void cmd_finish(pid_t pid) {
     if (g_nrbps == 0 || !g_rbps[0].armed) {
         fprintf(stderr, "finish: could not arm return-address breakpoint at 0x%llx\n",
                 (unsigned long long)ret_addr);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1777,7 +1778,7 @@ void cmd_finish(pid_t pid) {
         ptrace(PTRACE_POKETEXT, pid, (void*)g_rbps[i].addr, (void*)nw);
         g_rbps[i].armed = false;
     }
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 
     if (g_interrupt) {
         if (g_is_tty) printf(A_GREEN "  ★ Aborted finish on PID %d (detached; process continues).\n" A_RESET, pid);
@@ -1793,7 +1794,7 @@ void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
     if (prot < 0) { fprintf(stderr, "mprotect: invalid perms '%s'\n", perms_str); return; }
 
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "mprotect: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "mprotect: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH mprotect");
@@ -1811,23 +1812,23 @@ void cmd_mprotect(pid_t pid, uint64_t addr, size_t len, const char *perms_str) {
         fprintf(stderr, "mprotect failed: %ld\n", ret);
     }
 
-    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    tracee_detach(pid, NULL);
 }
 
 void cmd_backtrace(pid_t pid, bool pause) {
     
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM)      { fprintf(stderr, "backtrace: permission denied\n"); }
         else if (errno == ESRCH) { fprintf(stderr, "backtrace: no such process %d\n", pid); }
         else DIE("PTRACE_ATTACH backtrace");
         return;
     }
-    int st; waitpid(pid, &st, __WALL);
+    int st; tracee_wait(pid, &st);
 
     regs_t regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
         perror("backtrace: PTRACE_GETREGS");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -1865,7 +1866,7 @@ void cmd_backtrace(pid_t pid, bool pause) {
         rip = next_rip;
     }
 
-    ptrace(PTRACE_DETACH, pid, NULL, (void*)(pause ? (long)SIGSTOP : 0));
+    tracee_detach(pid, (void*)(pause ? (long)SIGSTOP : 0));
 }
 
 /**
@@ -1885,7 +1886,7 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
     if (prot == 0) prot = PROT_READ | PROT_WRITE;
 
     bool was_attached = false;
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM || errno == EBUSY) was_attached = true;
         else { perror("upload: ATTACH"); return 0; }
     }
@@ -1895,14 +1896,14 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
         prot, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)remote_addr < 0) {
         fprintf(stderr, "upload: mmap failed (ret=%ld)\n", (long)remote_addr);
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
     if (!write_bytes_to_pid(pid, remote_addr, data, len)) {
         fprintf(stderr, "upload: write failed at 0x%016llx\n", (unsigned long long)remote_addr);
         remote_syscall_x64(pid, __NR_munmap, remote_addr, len, 0, 0, 0, 0);
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
@@ -1910,7 +1911,7 @@ uint64_t cmd_upload(pid_t pid, const void *data, size_t len, int prot) {
             len, (unsigned long long)remote_addr);
     else printf("Uploaded %zu bytes to 0x%016llx\n", len, (unsigned long long)remote_addr);
 
-    if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (!was_attached) tracee_detach(pid, NULL);
     return remote_addr;
 }
 
@@ -1965,7 +1966,7 @@ uint64_t cmd_resolve(pid_t pid, const char *symbol_name, bool quiet) {
     uint64_t remote_dlsym = remote_libc + dlsym_offset;
 
     bool was_attached = false;
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM || errno == EBUSY) was_attached = true;
         else { perror("resolve: ATTACH"); return 0; }
     }
@@ -1976,14 +1977,14 @@ uint64_t cmd_resolve(pid_t pid, const char *symbol_name, bool quiet) {
         PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)name_addr < 0) {
         fprintf(stderr, "resolve: mmap failed\n");
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
     if (!write_bytes_to_pid(pid, name_addr, symbol_name, name_len)) {
         fprintf(stderr, "resolve: write symbol name failed\n");
         remote_syscall_x64(pid, __NR_munmap, name_addr, name_len, 0, 0, 0, 0);
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return 0;
     }
 
@@ -2007,7 +2008,7 @@ uint64_t cmd_resolve(pid_t pid, const char *symbol_name, bool quiet) {
         }
     }
 
-    if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (!was_attached) tracee_detach(pid, NULL);
     return result;
 }
 
@@ -2081,7 +2082,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     
     bool already_attached = false;
 
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM || errno == EBUSY) already_attached = true;
         else { perror("call: ATTACH"); return 0; }
     }
@@ -2093,7 +2094,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     regs_t saved_regs, regs;
     if (ptrace(PTRACE_GETREGS, pid, 0, &saved_regs) == -1) {
         perror("call: GETREGS");
-        if (!already_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!already_attached) tracee_detach(pid, NULL);
         return 0;
     }
     regs = saved_regs;
@@ -2104,13 +2105,13 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
         PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if ((long)trap_pocket < 0) {
         fprintf(stderr, "call: trap mmap failed\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL); return 0;
+        tracee_detach(pid, NULL); return 0;
     }
     unsigned char int3 = 0xCC;
     if (!write_bytes_to_pid(pid, trap_pocket, &int3, 1)) {
         fprintf(stderr, "call: failed to write INT3 to pocket\n");
         remote_syscall_x64(pid, __NR_munmap, trap_pocket, 4096, 0, 0, 0, 0);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL); return 0;
+        tracee_detach(pid, NULL); return 0;
     }
     
     if (argc >= 1) regs.rdi = strtoull(argv[0], NULL, 0);
@@ -2125,7 +2126,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     if (!write_bytes_to_pid(pid, regs.rsp, &trap_pocket, 8)) {
         fprintf(stderr, "call: failed to push return address\n");
         remote_syscall_x64(pid, __NR_munmap, trap_pocket, 4096, 0, 0, 0, 0);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL); return 0;
+        tracee_detach(pid, NULL); return 0;
     }
 
     regs.rip = addr;
@@ -2163,7 +2164,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     ptrace(PTRACE_SETREGS, pid, 0, &saved_regs);
     (void)remote_syscall_x64(pid, __NR_munmap, trap_pocket, 4096, 0, 0, 0, 0);
 
-    if (detach && !already_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (detach && !already_attached) tracee_detach(pid, NULL);
     return ret;
 }
 
@@ -2195,7 +2196,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
     size_t path_len = strlen(so_path) + 1;
 
     bool was_attached = false;
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         if (errno == EPERM || errno == EBUSY) was_attached = true;
         else { perror("load_so: ATTACH"); return; }
     }
@@ -2224,14 +2225,14 @@ void cmd_load_so(pid_t pid, const char *so_path) {
 
     if (local_libc == 0 || remote_libc == 0) {
         fprintf(stderr, "load_so: couldn't find libc\n");
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return;
     }
 
     void *local_dlopen = dlsym(RTLD_DEFAULT, "dlopen");
     if (!local_dlopen) {
         fprintf(stderr, "load_so: couldn't find local symbols\n");
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return;
     }
 
@@ -2241,7 +2242,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
     uint64_t path_addr = cmd_upload(pid, so_path, path_len, PROT_READ);
     if (path_addr == 0) {
         fprintf(stderr, "load_so: failed to upload path\n");
-        if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (!was_attached) tracee_detach(pid, NULL);
         return;
     }
 
@@ -2261,7 +2262,7 @@ void cmd_load_so(pid_t pid, const char *so_path) {
 
     remote_syscall_x64(pid, __NR_munmap, path_addr, path_len, 0, 0, 0, 0);
 
-    if (!was_attached) ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (!was_attached) tracee_detach(pid, NULL);
 }
 
 size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen, const char *seg, size_t count) {
@@ -2359,7 +2360,7 @@ extern uint8_t _binary_parasite_bin_end[];
 void inject_and_restore(pid_t pid, const char *indir) {
     fprintf(stderr, "[parasite] Starting parasite restore for PID %d from %s\n", pid, indir);
 
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+    if (tracee_attach(pid) == -1) {
         perror("PTRACE_ATTACH");
         return;
     }
@@ -2367,7 +2368,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     waitpid(pid, &status, __WALL);
     if (!WIFSTOPPED(status)) {
         fprintf(stderr, "[parasite] Unexpected initial status: 0x%x\n", status);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] Initial signal: %d\n", WSTOPSIG(status));
@@ -2379,7 +2380,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     procmaps_iterator *it = parse_maps_dump(indir);
     if (!it) {
         fprintf(stderr, "[parasite] Failed to parse checkpoint maps\n");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -2468,7 +2469,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if ((long)parasite_addr < 0) {
         fprintf(stderr, "[parasite] Failed to allocate memory in target\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -2477,7 +2478,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (!write_bytes_to_pid(pid, parasite_addr, parasite_start_ptr, parasite_code_size)) {
         fprintf(stderr, "[parasite] Failed to write parasite blob\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] Parasite blob written\n");
@@ -2488,7 +2489,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (!write_bytes_to_pid(pid, ctrl_addr, &ctrl, sizeof(ctrl))) {
         fprintf(stderr, "[parasite] Failed to write ControlBlock\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] ControlBlock written\n");
@@ -2506,7 +2507,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (!write_bytes_to_pid(pid, args_addr, &args, sizeof(args))) {
         fprintf(stderr, "[parasite] Failed to write ParasiteArgs\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] ParasiteArgs written\n");
@@ -2515,7 +2516,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (!write_bytes_to_pid(pid, regions_addr, regions, num_regions * sizeof(RegionDesc))) {
         fprintf(stderr, "[parasite] Failed to write RegionDescs\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] RegionDescs written\n");
@@ -2526,7 +2527,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
         perror("PTRACE_GETREGS");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -2540,7 +2541,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) {
         perror("PTRACE_SETREGS");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     
@@ -2559,7 +2560,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
         fprintf(stderr, "[parasite] Failed to get initial int3\n");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] Parasite ready (first int3 received)\n");
@@ -2607,7 +2608,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
     if (mem_fd < 0) {
         perror("open /proc/pid/mem");
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
 
@@ -2689,7 +2690,7 @@ void inject_and_restore(pid_t pid, const char *indir) {
         fprintf(stderr, "[parasite] Final int3 not received, status=0x%x\n", status);
         close(mem_fd);
         free(regions);
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        tracee_detach(pid, NULL);
         return;
     }
     fprintf(stderr, "[parasite] All done int3 received, unmapping parasite + restoring registers...\n");

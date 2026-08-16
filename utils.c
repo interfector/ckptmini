@@ -26,6 +26,55 @@ pid_t waitpid_eintr(pid_t pid, int *status) {
     return r;
 }
 
+/*
+ * Interactive-shell "hold" machinery.
+ *
+ * The REPL can keep one target attached and stopped (`attach <pid>` /
+ * `set $pid <pid>`), so register/memory reads see a stable process.  While a
+ * pid is held, per-command attach becomes a no-op (we already are the tracer)
+ * and per-command detach becomes a no-op too (the hold is kept).  Outside the
+ * shell (g_held_pid == -1) all three helpers behave exactly like the raw
+ * ptrace/waitpid calls they wrap, so the CLI and the test suite are
+ * unaffected.
+ */
+pid_t g_held_pid = -1;
+
+long tracee_attach(pid_t pid) {
+    if (g_held_pid == pid) return 0;
+    return ptrace(PTRACE_ATTACH, pid, NULL, NULL);
+}
+
+pid_t tracee_wait(pid_t pid, int *status) {
+    if (g_held_pid == pid) {
+        if (status) *status = 0;
+        return pid;
+    }
+    return waitpid(pid, status, __WALL);
+}
+
+long tracee_detach(pid_t pid, void *data) {
+    if (g_held_pid == pid) return 0;
+    return ptrace(PTRACE_DETACH, pid, NULL, data);
+}
+
+void hold_pid(pid_t pid) {
+    if (g_held_pid != -1) release_hold();
+    if (tracee_attach(pid) == -1) {
+        perror("attach");
+        return;
+    }
+    int st;
+    if (waitpid(pid, &st, __WALL) == -1)
+        perror("attach: waitpid");
+    g_held_pid = pid;
+}
+
+void release_hold(void) {
+    if (g_held_pid == -1) return;
+    ptrace(PTRACE_DETACH, g_held_pid, NULL, NULL);
+    g_held_pid = -1;
+}
+
 static const reg_entry_t reg_table[] = {
     { "r15", 0x00 },
     { "r14", 0x08 },
@@ -75,9 +124,9 @@ int setreg(setreg_mode_t mode, void *target, const char *regname, uint64_t value
     int ret = 0;
     if (mode == SETREG_LIVE) {
         pid_t pid = *(pid_t*)target;
-        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) { perror("PTRACE_ATTACH"); return -1; }
-        waitpid(pid, NULL, 0);
-        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { perror("PTRACE_GETREGS"); ptrace(PTRACE_DETACH, pid, NULL, NULL); return -1; }
+        if (tracee_attach(pid) == -1) { perror("PTRACE_ATTACH"); return -1; }
+        tracee_wait(pid, NULL);
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { perror("PTRACE_GETREGS"); tracee_detach(pid, NULL); return -1; }
     } else {
         const char *indir = (const char*)target;
         char rpath[512]; snprintf(rpath, sizeof(rpath), "%s/regs.bin", indir);
@@ -89,19 +138,19 @@ int setreg(setreg_mode_t mode, void *target, const char *regname, uint64_t value
     uint64_t oldval = 0;
     if (get_reg_by_name(&regs, regname, &oldval) != 0) {
         fprintf(stderr, "Unknown register: %s\n", regname);
-        if (mode == SETREG_LIVE) ptrace(PTRACE_DETACH, *(pid_t*)target, NULL, NULL);
+        if (mode == SETREG_LIVE) tracee_detach(*(pid_t*)target, NULL);
         return -1;
     }
     if (set_reg_by_name(&regs, regname, value) != 0) {
         fprintf(stderr, "Unknown register: %s\n", regname);
-        if (mode == SETREG_LIVE) ptrace(PTRACE_DETACH, *(pid_t*)target, NULL, NULL);
+        if (mode == SETREG_LIVE) tracee_detach(*(pid_t*)target, NULL);
         return -1;
     }
     fprintf(stderr, "[setreg] %s: 0x%016llx -> 0x%016llx\n", regname, (unsigned long long)oldval, (unsigned long long)value);
     if (mode == SETREG_LIVE) {
         pid_t pid = *(pid_t*)target;
-        if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) { perror("PTRACE_SETREGS"); ptrace(PTRACE_DETACH, pid, NULL, NULL); return -1; }
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) { perror("PTRACE_SETREGS"); tracee_detach(pid, NULL); return -1; }
+        tracee_detach(pid, NULL);
     } else {
         const char *indir = (const char*)target;
         char rpath[512]; snprintf(rpath, sizeof(rpath), "%s/regs.bin", indir);

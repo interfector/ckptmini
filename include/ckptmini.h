@@ -210,6 +210,47 @@ void install_sigint_stop(void);
 pid_t waitpid_eintr(pid_t pid, int *status);
 
 /**
+ * @brief PID held stopped by the interactive shell, or -1 when not holding
+ * While a pid is held, tracee_attach/tracee_wait/tracee_detach become no-ops
+ * for that pid so per-command attach/detach keeps the target stopped.
+ */
+extern pid_t g_held_pid;
+
+/**
+ * @brief Attach to a process (no-op if it is the held pid)
+ * @param pid Process ID
+ * @return ptrace(PTRACE_ATTACH) result, or 0 if already held
+ */
+long tracee_attach(pid_t pid);
+
+/**
+ * @brief Wait for a process stop (returns immediately if it is the held pid)
+ * @param pid Process ID
+ * @param status Output: wait status (synthesized as stopped if held)
+ * @return pid on success, -1 on error
+ */
+pid_t tracee_wait(pid_t pid, int *status);
+
+/**
+ * @brief Detach from a process (no-op if it is the held pid)
+ * @param pid Process ID
+ * @param data Detach data (signal to deliver, or NULL)
+ * @return ptrace(PTRACE_DETACH) result, or 0 if already held
+ */
+long tracee_detach(pid_t pid, void *data);
+
+/**
+ * @brief Attach to and hold a pid stopped (releasing any current hold)
+ * @param pid Process ID
+ */
+void hold_pid(pid_t pid);
+
+/**
+ * @brief Release the current hold (detaches; target resumes running)
+ */
+void release_hold(void);
+
+/**
  * @brief Format bytes as human-readable size
  * @param bytes Number of bytes
  * @param buf Output buffer
@@ -841,6 +882,23 @@ bool region_is_minimal_target_pm(const procmaps_struct *map);
  * @param prog Program name
  */
 void usage(const char *prog);
+
+/**
+ * @brief Dispatch a command line (argv[1] = command name)
+ * Behavior-compatible with the original argv dispatcher; returns an exit code.
+ * @param argc Argument count (argv[0] = program name)
+ * @param argv Argument vector
+ */
+int dispatch(int argc, char **argv);
+
+/**
+ * @brief Run the interactive shell (REPL)
+ * Also the entry point for `ckptmini -i` / `ckptmini --interactive` and for
+ * a bare `ckptmini` started on a terminal.
+ * @param argc Argument count
+ * @param argv Argument vector (argv[0] = program name)
+ */
+int cmd_shell(int argc, char **argv);
 
 /**
  * @brief Check if checkpoint is incremental
