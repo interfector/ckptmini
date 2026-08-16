@@ -133,9 +133,9 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
 ### JSON Output
 
-Append `--json` to a command to get machine-readable output on stdout (errors
-go to stderr, exit codes are unchanged). This lets commands be chained through
-pipes, e.g.:
+Append `--json` to a command to get machine-readable output on stdout, with
+failures signalled by a non-zero exit code. This lets commands be chained
+through pipes, e.g.:
 
 ```bash
 # Find every occurrence of bytes 90 90 and write 00 at each address
@@ -153,6 +153,8 @@ Commands that currently support `--json`:
 |---------|--------|
 | `search_bytes` / `search_str` | `{"ok":true,"addr":"0x..."}` |
 | `search_all_bytes` / `search_all_str` | `{"ok":true,"addrs":["0x...",...]}` |
+| `search_dump_bytes` / `search_dump_str` | `{"ok":true,"addr":"0x..."}` |
+| `search_dump_all_bytes` / `search_dump_all_str` | `{"ok":true,"addrs":["0x...",...]}` |
 | `read` | `{"ok":true,"addr":"0x...","len":N,"hex":"...","ascii":"..."}` |
 | `write` / `write_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
 | `resolve` / `elfresolve` | `{"ok":true,"name":"...","addr":"0x...","source":"dlsym\|elfsym"}` |
@@ -168,6 +170,49 @@ All other `--json` commands emit a single JSON object.
 
 On failure the object is `{"ok":false,"command":"...","error":"..."}` and the
 exit code is non-zero.
+
+### Example One-liners
+
+The JSON output is meant to be composed through pipes with `jq` — no wrapper
+library needed. A few handy pipelines:
+
+```bash
+PID=1234
+
+# Read bytes at a resolved symbol's address
+./ckptmini read "$PID" "$(./ckptmini elfresolve "$PID" main --json | jq -r '.addr')" 16 --json | jq -r '.hex'
+
+# Resolve several symbols in one go
+for s in main add_numbers global_var; do
+    ./ckptmini elfresolve "$PID" "$s" --json | jq -r '"\(.name)  \(.addr)"'
+done
+
+# Remote function call: retval is the call's return value
+./ckptmini call "$PID" "$(./ckptmini elfresolve "$PID" add_numbers --json | jq -r '.addr')" 40 2 --json | jq -r '.retval'
+
+# Step 5 instructions and collect the RIP trail
+./ckptmini step "$PID" 5 --json | jq -r '.rip'
+
+# Poor-man's watchpoint: poll an address until the value changes
+while :; do v=$(./ckptmini read "$PID" "$ADDR" 8 --json | jq -r '.hex'); [ "$v" != "$prev" ] && { echo "changed: $v"; break; }; prev=$v; sleep 0.2; done
+
+# List executable mappings (filter the maps array)
+./ckptmini show "$PID" --json | jq -r '.maps[] | select(.perms | contains("x")) | .path' | sort -u
+
+# Find every `call` instruction in a disassembled region
+./ckptmini disas "$PID" "$FUNC_ADDR" 64 --json | jq -r '.insns[] | select(.mnemonic == "call") | .op_str'
+
+# Find every occurrence of bytes 90 90 and write 00 at each address
+./ckptmini search_all_bytes "$PID" 9090 --json | jq -r '.addrs[]' | while read -r a; do
+    ./ckptmini write "$PID" "$a" 00
+done
+```
+
+Notes:
+- `search_all_*` always exits 0 even with zero matches, so check the returned
+  `.addrs` array length before looping.
+- `write` can only modify already-writable mappings (read-only pages fail), so
+  pass the `data` segment filter to focus on writable memory.
 
 ### Process Inspection
 

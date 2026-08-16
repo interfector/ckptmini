@@ -767,7 +767,7 @@ void step_pid(pid_t pid, int max_steps);
  * @param count Max results (-1 for all)
  * @return Number of matches found
  */
-size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen, const char *seg, size_t count);
+size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen, const char *seg, size_t count, search_ctx_t *ctx);
 
 /**
  * @brief Check if permissions match segment filter

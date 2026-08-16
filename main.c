@@ -657,11 +657,22 @@ int dispatch(int argc, char **argv) {
         const char *indir = argv[2];
         const char *text = argv[3];
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        
-        if (g_is_tty) printf(A_BOLD A_CYAN);
-        printf("  %s Searching for string '%s' in dump %s\n", S_INFO, text, indir);
-        if (g_is_tty) printf(A_RESET);
-        size_t found = search_all_in_dumped_maps(indir, (const unsigned char*)text, strlen(text), seg, 1);
+        search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = stdout, .addrs = NULL, .naddrs = 0 };
+        if (!g_json) {
+            if (g_is_tty) printf(A_BOLD A_CYAN);
+            printf("  %s Searching for string '%s' in dump %s\n", S_INFO, text, indir);
+            if (g_is_tty) printf(A_RESET);
+        }
+        size_t found = search_all_in_dumped_maps(indir, ctx.needle, ctx.nlen, seg, 1, &ctx);
+        if (g_json) {
+            if (found > 0) {
+                printf("{\"ok\":true,\"command\":\"search_dump_str\",\"addr\":\"0x%016llx\"}\n",
+                       (unsigned long long)ctx.addrs[0]);
+            } else {
+                json_err("search_dump_str", "not found");
+            }
+            free(ctx.addrs);
+        }
         return (found > 0) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
@@ -672,6 +683,7 @@ int dispatch(int argc, char **argv) {
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
         if (!bytes) {
+            if (g_json) { json_err("search_dump_bytes", "invalid hex bytes"); return EXIT_FAILURE; }
             
             if (g_is_tty) printf(A_BOLD A_RED);
             printf("  %s Invalid hex bytes\n", S_ERR);
@@ -679,12 +691,23 @@ int dispatch(int argc, char **argv) {
             return EXIT_FAILURE;
         }
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        
-        if (g_is_tty) printf(A_BOLD A_CYAN);
-        printf("  %s Searching for bytes %s in dump %s\n", S_INFO, hex, indir);
-        if (g_is_tty) printf(A_RESET);
-        size_t found = search_all_in_dumped_maps(indir, bytes, blen, seg, 1);
+        if (!g_json) {
+            if (g_is_tty) printf(A_BOLD A_CYAN);
+            printf("  %s Searching for bytes %s in dump %s\n", S_INFO, hex, indir);
+            if (g_is_tty) printf(A_RESET);
+        }
+        search_ctx_t ctx = { .needle = bytes, .nlen = blen, .seg = seg, .found = 0, .out_all = stdout, .addrs = NULL, .naddrs = 0 };
+        size_t found = search_all_in_dumped_maps(indir, bytes, blen, seg, 1, &ctx);
         free(bytes);
+        if (g_json) {
+            if (found > 0) {
+                printf("{\"ok\":true,\"command\":\"search_dump_bytes\",\"addr\":\"0x%016llx\"}\n",
+                       (unsigned long long)ctx.addrs[0]);
+            } else {
+                json_err("search_dump_bytes", "not found");
+            }
+            free(ctx.addrs);
+        }
         return (found > 0) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
@@ -738,7 +761,17 @@ int dispatch(int argc, char **argv) {
         const char *indir = argv[2];
         const char *text = argv[3];
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        (void)search_all_in_dumped_maps(indir, (const unsigned char*)text, strlen(text), seg, -1);
+        search_ctx_t ctx = { .needle = (const unsigned char*)text, .nlen = strlen(text), .seg = seg, .found = 0, .out_all = stdout, .addrs = NULL, .naddrs = 0 };
+        (void)search_all_in_dumped_maps(indir, ctx.needle, ctx.nlen, seg, -1, &ctx);
+        if (g_json) {
+            printf("{\"ok\":true,\"command\":\"search_dump_all_str\",\"addrs\":[");
+            for (size_t i = 0; i < ctx.naddrs; i++) {
+                if (i) putchar(',');
+                printf("\"0x%016llx\"", (unsigned long long)ctx.addrs[i]);
+            }
+            printf("]}\n");
+            free(ctx.addrs);
+        }
         return EXIT_SUCCESS;
     }
 
@@ -748,10 +781,23 @@ int dispatch(int argc, char **argv) {
         const char *hex = argv[3];
         size_t blen = 0;
         unsigned char *bytes = parse_hex(hex, &blen);
-        if (!bytes) { fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE; }
+        if (!bytes) {
+            if (g_json) { json_err("search_dump_all_bytes", "invalid hex bytes"); return EXIT_FAILURE; }
+            fprintf(stderr, "invalid hex_bytes\n"); return EXIT_FAILURE;
+        }
         const char *seg = (argc >= 5 ? argv[4] : "any");
-        (void)search_all_in_dumped_maps(indir, bytes, blen, seg, -1);
+        search_ctx_t ctx = { .needle = bytes, .nlen = blen, .seg = seg, .found = 0, .out_all = stdout, .addrs = NULL, .naddrs = 0 };
+        (void)search_all_in_dumped_maps(indir, bytes, blen, seg, -1, &ctx);
         free(bytes);
+        if (g_json) {
+            printf("{\"ok\":true,\"command\":\"search_dump_all_bytes\",\"addrs\":[");
+            for (size_t i = 0; i < ctx.naddrs; i++) {
+                if (i) putchar(',');
+                printf("\"0x%016llx\"", (unsigned long long)ctx.addrs[i]);
+            }
+            printf("]}\n");
+            free(ctx.addrs);
+        }
         return EXIT_SUCCESS;
     }
 

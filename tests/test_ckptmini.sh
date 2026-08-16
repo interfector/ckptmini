@@ -640,6 +640,51 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 #######################################
+# Test 27e: JSON output mode (dump searches)
+#######################################
+info "Test 27e: JSON output mode (dump searches)"
+
+if command -v jq >/dev/null 2>&1 && [ -f "$SAVEDIR/maps.txt" ]; then
+    DSTR=$($CKPTMINI search_dump_str "$SAVEDIR" "add_numbers is at" --json 2>&1)
+    if echo "$DSTR" | jq -e '.ok == true and .command == "search_dump_str" and (.addr | startswith("0x"))' >/dev/null 2>&1; then
+        pass "json - search_dump_str returns addr"
+    else
+        fail "json - search_dump_str malformed (output: $DSTR)"
+    fi
+
+    DBYTES=$($CKPTMINI search_dump_bytes "$SAVEDIR" 2a000000 --json 2>&1)
+    if echo "$DBYTES" | jq -e '.ok == true and .command == "search_dump_bytes" and (.addr | startswith("0x"))' >/dev/null 2>&1; then
+        pass "json - search_dump_bytes returns addr"
+    else
+        fail "json - search_dump_bytes malformed (output: $DBYTES)"
+    fi
+
+    DALL=$($CKPTMINI search_dump_all_str "$SAVEDIR" "add_numbers is at" --json 2>&1)
+    if echo "$DALL" | jq -e '.ok == true and .command == "search_dump_all_str" and (.addrs | type == "array" and length > 0)' >/dev/null 2>&1; then
+        pass "json - search_dump_all_str returns addrs array"
+    else
+        fail "json - search_dump_all_str malformed (output: $DALL)"
+    fi
+
+    DALLB=$($CKPTMINI search_dump_all_bytes "$SAVEDIR" 2a000000 --json 2>&1)
+    if echo "$DALLB" | jq -e '.ok == true and .command == "search_dump_all_bytes" and (.addrs | type == "array" and length > 0)' >/dev/null 2>&1; then
+        pass "json - search_dump_all_bytes returns addrs array"
+    else
+        fail "json - search_dump_all_bytes malformed (output: $DALLB)"
+    fi
+
+    DMISS=$($CKPTMINI search_dump_str "$SAVEDIR" zzzz_not_in_dump_zzzz --json 2>&1)
+    DRC=$?
+    if [ "$DRC" -ne 0 ] && echo "$DMISS" | jq -e '.ok == false and .command == "search_dump_str"' >/dev/null 2>&1; then
+        pass "json - search_dump_str missing returns ok:false + nonzero exit"
+    else
+        fail "json - search_dump_str missing (rc=$DRC output: $DMISS)"
+    fi
+else
+    warn "jq missing or no saved dump, skipping dump JSON test"
+fi
+
+#######################################
 # TEST 28: Upload string to remote process (needs root)
 #######################################
 info "Test 28: upload --str command"

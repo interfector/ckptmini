@@ -2339,7 +2339,8 @@ void cmd_load_so(pid_t pid, const char *so_path) {
     if (!was_attached) tracee_detach(pid, NULL);
 }
 
-size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen, const char *seg, size_t count) {
+size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle, size_t nlen,
+                                 const char *seg, size_t count, search_ctx_t *ctx) {
     procmaps_iterator *it = parse_maps_dump(indir);
     if (!it) return 0;
     size_t found = 0;
@@ -2367,12 +2368,17 @@ size_t search_all_in_dumped_maps(const char *indir, const unsigned char *needle,
             for (size_t i=0; i+nlen <= scan_len; i++) {
                 if (memcmp(buf+i, needle, nlen) == 0) {
                     uint64_t addr = (uint64_t)map->addr_start + i;
-                    if (g_is_tty) printf(A_BOLD A_GREEN);
-                    printf("%s offset=0x%zx addr=%016lx\n", cpath, i, (unsigned long)addr);
-                    if (g_is_tty) printf(A_RESET);
-                    size_t ctx_start = (i >= 16) ? i - 16 : 0;
-                    size_t ctx_len = (i + nlen + 16 <= scan_len) ? 32 : scan_len - ctx_start;
-                    hexdump_line((uint64_t)map->addr_start + ctx_start, buf + ctx_start, ctx_len);
+                    if (g_json && ctx) {
+                        uint64_t *na = (uint64_t*)realloc(ctx->addrs, (ctx->naddrs + 1) * sizeof(*na));
+                        if (na) { ctx->addrs = na; ctx->addrs[ctx->naddrs++] = addr; }
+                    } else {
+                        if (g_is_tty) printf(A_BOLD A_GREEN);
+                        printf("%s offset=0x%zx addr=%016lx\n", cpath, i, (unsigned long)addr);
+                        if (g_is_tty) printf(A_RESET);
+                        size_t ctx_start = (i >= 16) ? i - 16 : 0;
+                        size_t ctx_len = (i + nlen + 16 <= scan_len) ? 32 : scan_len - ctx_start;
+                        hexdump_line((uint64_t)map->addr_start + ctx_start, buf + ctx_start, ctx_len);
+                    }
                     found++; if (count > 0 && found >= count) { free(buf); pmparser_free(it); return found; }
                 }
             }
