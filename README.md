@@ -211,8 +211,10 @@ done
 Notes:
 - `search_all_*` always exits 0 even with zero matches, so check the returned
   `.addrs` array length before looping.
-- `write` can only modify already-writable mappings (read-only pages fail), so
-  pass the `data` segment filter to focus on writable memory.
+- `write` can modify any mapped page: writable pages are written directly via
+  `/proc/<pid>/mem`, and read-only pages (e.g. `.text`) get a brief
+  attach → temp `mprotect` RW → write → restore-prot → detach cycle, so the
+  target is only paused for the duration of the write.
 
 ### Process Inspection
 

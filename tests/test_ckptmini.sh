@@ -548,6 +548,23 @@ if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
         fail "json - write malformed (output: $JSON4)"
     fi
 
+    # write to a read-only (.text) page succeeds via attach-pause-resume:
+    # write the original bytes back and confirm the page is unchanged
+    FADDR=$($CKPTMINI elfresolve "$TESTCALL_PID" add_numbers --json 2>/dev/null | jq -r '.addr // empty')
+    if [ -n "$FADDR" ] && echo "$FADDR" | grep -q '^0x'; then
+        FORIG=$($CKPTMINI read "$TESTCALL_PID" "$FADDR" 8 --json 2>&1 | jq -r '.hex // empty')
+        $CKPTMINI write "$TESTCALL_PID" "$FADDR" "$FORIG" >/dev/null 2>&1
+        FRC=$?
+        FAFF=$($CKPTMINI read "$TESTCALL_PID" "$FADDR" 8 --json 2>&1 | jq -r '.hex // empty')
+        if [ "$FRC" -eq 0 ] && [ "$FAFF" = "$FORIG" ]; then
+            pass "write - read-only .text page via attach-pause-resume"
+        else
+            fail "write - read-only .text page (rc=$FRC after=$FAFF orig=$FORIG)"
+        fi
+    else
+        warn "could not resolve add_numbers, skipping read-only write test"
+    fi
+
     # resolve returns a source field
     JSON5=$($CKPTMINI resolve "$TESTCALL_PID" printf --json 2>&1)
     if echo "$JSON5" | jq -e '.ok == true and (.source == "dlsym" or .source == "elfsym")' >/dev/null 2>&1; then

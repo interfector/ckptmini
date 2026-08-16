@@ -186,16 +186,33 @@ bool mem_write_region(pid_t pid, uint64_t addr, const void *data, size_t len) {
     }
     bool need_temp = (prot & PROT_WRITE) == 0;
     if (need_temp) {
-        if (remote_mprotect(pid, addr, len, prot | PROT_WRITE) != 0) {
+        long psz = sysconf(_SC_PAGESIZE);
+        uint64_t pstart = addr & ~((uint64_t)psz - 1);
+        size_t plen = (size_t)(((addr + len + (uint64_t)psz - 1) & ~((uint64_t)psz - 1)) - pstart);
+        bool was_held = (g_held_pid == pid);
+        if (tracee_attach(pid) == -1) {
             if (!g_json)
-                fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
-                        (unsigned long long)addr, (unsigned long long)(addr+len));
+                fprintf(stderr,
+                        "[mw] attach failed for pid %d (%s); read-only pages need a paused target\n",
+                        (int)pid, strerror(errno));
             return false;
         }
+        int st; tracee_wait(pid, &st);
+        if (remote_mprotect(pid, pstart, plen, prot | PROT_WRITE) != 0) {
+            if (!g_json)
+                fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
+                        (unsigned long long)pstart, (unsigned long long)(pstart + plen));
+            if (!was_held) tracee_detach(pid, NULL);
+            return false;
+        }
+        bool ok = write_bytes_to_pid(pid, addr, data, len);
+        if (!ok && !g_json) perror("process write");
+        (void)remote_mprotect(pid, pstart, plen, prot);
+        if (!was_held) tracee_detach(pid, NULL);
+        return ok;
     }
     bool ok = write_bytes_to_pid(pid, addr, data, len);
     if (!ok && !g_json) perror("process write");
-    if (need_temp) (void)remote_mprotect(pid, addr, len, prot);
     return ok;
 }
 
