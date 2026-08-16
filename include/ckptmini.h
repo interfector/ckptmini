@@ -110,6 +110,8 @@ typedef struct {
     const char *seg;              /**< Segment filter (e.g., "heap", "stack", "any") */
     uint64_t found;               /**< First match address (for single search) */
     FILE *out_all;                /**< Output file for "find all" searches */
+    uint64_t *addrs;              /**< Collected matches (JSON "find all" searches) */
+    size_t naddrs;                /**< Number of collected matches */
 } search_ctx_t;
 
 /**
@@ -187,6 +189,19 @@ bool is_tty(void);
  * @brief Global flag: true if stdout is a TTY (set once at startup)
  */
 extern bool g_is_tty;
+
+/**
+ * @brief Global flag: when set, data-producing commands emit JSON to stdout.
+ * Enabled by the --json flag (stripped from argv by dispatch()).
+ */
+extern bool g_json;
+
+/* Emit a JSON string literal for buf[0..len) (escapes quotes/backslashes,
+   renders non-printables as '.'). */
+void json_print_escaped(const unsigned char *buf, size_t len);
+
+/* Emit a JSON error object {"ok":false,"command":...,"error":...}. */
+void json_err(const char *cmd, const char *msg);
 
 /**
  * @brief Global flag: set to 1 by SIGINT handler to stop a tracing loop

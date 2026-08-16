@@ -507,6 +507,139 @@ else
 fi
 
 #######################################
+# Test 27c: JSON output mode (--json)
+#######################################
+info "Test 27c: JSON output mode"
+
+if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # search_bytes returns {"ok":true,"addr":"0x..."}
+    JSON=$($CKPTMINI search_bytes "$TESTCALL_PID" 9090 --json 2>&1)
+    echo "$JSON"
+    if echo "$JSON" | jq -e '.ok == true and (.addr | startswith("0x"))' >/dev/null 2>&1; then
+        pass "json - search_bytes returns ok + addr"
+    else
+        fail "json - search_bytes malformed (output: $JSON)"
+    fi
+
+    # search_all_bytes returns an addrs array
+    JSON2=$($CKPTMINI search_all_bytes "$TESTCALL_PID" 9090 --json 2>&1)
+    if echo "$JSON2" | jq -e '.ok == true and (.addrs | type == "array" and length > 0)' >/dev/null 2>&1; then
+        pass "json - search_all_bytes returns addrs array"
+    else
+        fail "json - search_all_bytes malformed (output: $JSON2)"
+    fi
+
+    # read returns hex bytes
+    ADDR=$(echo "$JSON" | jq -r '.addr')
+    JSON3=$($CKPTMINI read "$TESTCALL_PID" "$ADDR" 2 --json 2>&1)
+    if echo "$JSON3" | jq -e '.ok == true and (.hex | test("^[0-9a-f]+$"))' >/dev/null 2>&1; then
+        pass "json - read returns hex"
+    else
+        fail "json - read malformed (output: $JSON3)"
+    fi
+
+    # write returns ok + bytes (target is global_var's writable .data slot,
+    # whose address the target itself prints on startup)
+    GVADDR=$(sed -n 's/.*global_var is at \(0x[0-9a-f]*\).*/\1/p' "$TESTDIR/test_call_output.txt" | head -1)
+    JSON4=$($CKPTMINI write "$TESTCALL_PID" "$GVADDR" 9090 --json 2>&1)
+    if echo "$JSON4" | jq -e '.ok == true and .bytes == 2' >/dev/null 2>&1; then
+        pass "json - write returns ok + bytes"
+    else
+        fail "json - write malformed (output: $JSON4)"
+    fi
+
+    # resolve returns a source field
+    JSON5=$($CKPTMINI resolve "$TESTCALL_PID" printf --json 2>&1)
+    if echo "$JSON5" | jq -e '.ok == true and (.source == "dlsym" or .source == "elfsym")' >/dev/null 2>&1; then
+        pass "json - resolve returns source"
+    else
+        fail "json - resolve malformed (output: $JSON5)"
+    fi
+
+    # a missing search yields ok:false and a nonzero exit code
+    MISSING=$($CKPTMINI search_str "$TESTCALL_PID" zzzz_ckptmini_does_not_exist_zzzz --json 2>&1)
+    RC=$?
+    if [ "$RC" -ne 0 ] && echo "$MISSING" | jq -e '.ok == false' >/dev/null 2>&1; then
+        pass "json - missing search returns ok:false + nonzero exit"
+    else
+        fail "json - missing search (rc=$RC output: $MISSING)"
+    fi
+else
+    warn "jq missing or test_call not running, skipping JSON test"
+fi
+
+#######################################
+# Test 27d: JSON output mode (extended commands)
+#######################################
+info "Test 27d: JSON output mode (extended)"
+
+if command -v jq >/dev/null 2>&1 && kill -0 "$TESTCALL_PID" 2>/dev/null; then
+    # call returns retval (add_numbers(20,22) == 42 == 0x2a)
+    CALL_JSON=$($CKPTMINI call "$TESTCALL_PID" "$ADDY" 20 22 --json 2>&1)
+    if echo "$CALL_JSON" | jq -e '.ok == true and .retval == "0x2a"' >/dev/null 2>&1; then
+        pass "json - call returns retval"
+    else
+        fail "json - call malformed (output: $CALL_JSON)"
+    fi
+
+    # backtrace returns a frames array
+    BT_JSON=$($CKPTMINI backtrace "$TESTCALL_PID" --json 2>&1)
+    if echo "$BT_JSON" | jq -e '.ok == true and (.frames | type == "array" and length > 0 and .[0].rip != null)' >/dev/null 2>&1; then
+        pass "json - backtrace returns frames array"
+    else
+        fail "json - backtrace malformed (output: $BT_JSON)"
+    fi
+
+    # disas returns an insns array
+    DIS_JSON=$($CKPTMINI disas "$TESTCALL_PID" "$ADDY" 12 --json 2>&1)
+    if echo "$DIS_JSON" | jq -e '.ok == true and (.insns | type == "array" and length > 0 and .[0].mnemonic != null)' >/dev/null 2>&1; then
+        pass "json - disas returns insns array"
+    else
+        fail "json - disas malformed (output: $DIS_JSON)"
+    fi
+
+    # step emits one JSON object per step (JSON Lines)
+    STEP_JSON=$($CKPTMINI step "$TESTCALL_PID" 3 --json 2>&1)
+    if echo "$STEP_JSON" | jq -s -e '(length == 3) and all(.[]; .ok == true and (.rip | startswith("0x")))' >/dev/null 2>&1; then
+        pass "json - step emits one object per step"
+    else
+        fail "json - step malformed (output: $STEP_JSON)"
+    fi
+
+    # show returns maps + regs
+    SHOW_JSON=$($CKPTMINI show "$TESTCALL_PID" --json 2>&1)
+    if echo "$SHOW_JSON" | jq -e '.ok == true and (.maps | length > 0) and (.regs.rip != null)' >/dev/null 2>&1; then
+        pass "json - show returns maps + regs"
+    else
+        fail "json - show malformed (output: $SHOW_JSON)"
+    fi
+else
+    warn "jq missing or test_call not running, skipping extended JSON test"
+fi
+
+# finish --json needs a target stopped inside a returning function (test_finish)
+if command -v jq >/dev/null 2>&1; then
+    "$TESTFINISH" > "$TESTDIR/test_finish_json.txt" 2>&1 &
+    TFJ_PID=$!
+    for i in $(seq 1 100); do
+        grep -q "spinwork started" "$TESTDIR/test_finish_json.txt" 2>/dev/null && break
+        sleep 0.05
+    done
+    if kill -0 "$TFJ_PID" 2>/dev/null; then
+        FIN_JSON=$($CKPTMINI finish "$TFJ_PID" --json 2>&1)
+        if echo "$FIN_JSON" | jq -e '.ok == true and .symbol == "spinwork" and .retval == "0x2a"' >/dev/null 2>&1; then
+            pass "json - finish returns symbol + retval"
+        else
+            fail "json - finish malformed (output: $FIN_JSON)"
+        fi
+        kill -9 "$TFJ_PID" 2>/dev/null || true
+        wait "$TFJ_PID" 2>/dev/null || true
+    else
+        warn "test_finish not running, skipping finish JSON test"
+    fi
+fi
+
+#######################################
 # TEST 28: Upload string to remote process (needs root)
 #######################################
 info "Test 28: upload --str command"
@@ -856,6 +989,53 @@ if kill -0 "$TESTSTATIC_PID" 2>/dev/null; then
     wait "$TESTSTATIC_PID" 2>/dev/null || true
 else
     warn "test_static not running, skipping ftrace static test"
+fi
+
+#######################################
+# TEST 38b: data symbol (STT_OBJECT) resolution
+# global_var is in .symtab only (not .dynsym), so dlsym cannot see it and
+# elfsym must also cover symbols outside the text mapping.
+#######################################
+info "Test 38b: data symbol resolution"
+
+"$TESTCALL" > "$TESTDIR/test_call_38b_output.txt" 2>&1 &
+TESTCALL_38B_PID=$!
+sleep 0.5
+
+GVADDR=$(sed -n 's/.*global_var is at \(0x[0-9a-f]*\).*/\1/p' "$TESTDIR/test_call_38b_output.txt" | head -1)
+
+if [ -n "$GVADDR" ] && kill -0 "$TESTCALL_38B_PID" 2>/dev/null; then
+    DATA_RES=$($CKPTMINI elfresolve "$TESTCALL_38B_PID" global_var 2>&1)
+    echo "$DATA_RES"
+
+    if echo "$DATA_RES" | grep -q "Resolved 'global_var'"; then
+        pass "elfresolve resolves data symbol (STT_OBJECT)"
+    else
+        fail "elfresolve - failed for global_var (output: $DATA_RES)"
+    fi
+
+    RESOLVE_DATA=$($CKPTMINI resolve "$TESTCALL_38B_PID" global_var 2>&1)
+    echo "$RESOLVE_DATA"
+
+    if echo "$RESOLVE_DATA" | grep -q "Resolved 'global_var'"; then
+        pass "resolve falls back to elfsym for data symbols"
+    else
+        fail "resolve - no elfsym fallback for global_var (output: $RESOLVE_DATA)"
+    fi
+
+    RESOLVED_ADDR=$(echo "$RESOLVE_DATA" | grep -o '0x[0-9a-f]*' | tail -1)
+    RESOLVED_HEX=$(printf '%x' "$(( RESOLVED_ADDR ))")
+    EXPECTED_HEX=$(printf '%x' "$(( GVADDR ))")
+    if [ "$RESOLVED_HEX" = "$EXPECTED_HEX" ]; then
+        pass "resolve matches target's printed global_var address"
+    else
+        fail "resolve address mismatch (got $RESOLVED_ADDR, expected $GVADDR)"
+    fi
+
+    kill -9 "$TESTCALL_38B_PID" 2>/dev/null || true
+    wait "$TESTCALL_38B_PID" 2>/dev/null || true
+else
+    warn "test_call/global_var address unavailable, skipping data symbol test"
 fi
 
 #######################################

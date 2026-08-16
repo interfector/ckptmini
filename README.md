@@ -131,6 +131,44 @@ The optional `seg` filter can be: `stack`, `heap`, `lib`, `any`.
 
 **Limitations:** Searches are linear and slow on large memory regions.
 
+### JSON Output
+
+Append `--json` to a command to get machine-readable output on stdout (errors
+go to stderr, exit codes are unchanged). This lets commands be chained through
+pipes, e.g.:
+
+```bash
+# Find every occurrence of bytes 90 90 and write 00 at each address
+./ckptmini search_all_bytes 12345 9090 --json | jq -r '.addrs[]' | while read -r a; do
+    ./ckptmini write 12345 "$a" 00
+done
+
+# Read bytes at a resolved symbol's address
+./ckptmini read 12345 "$(./ckptmini elfresolve 12345 main --json | jq -r '.addr')" 16 --json
+```
+
+Commands that currently support `--json`:
+
+| Command | Output |
+|---------|--------|
+| `search_bytes` / `search_str` | `{"ok":true,"addr":"0x..."}` |
+| `search_all_bytes` / `search_all_str` | `{"ok":true,"addrs":["0x...",...]}` |
+| `read` | `{"ok":true,"addr":"0x...","len":N,"hex":"...","ascii":"..."}` |
+| `write` / `write_str` | `{"ok":true,"addr":"0x...","bytes":N}` |
+| `resolve` / `elfresolve` | `{"ok":true,"name":"...","addr":"0x...","source":"dlsym\|elfsym"}` |
+| `call` | `{"ok":true,"addr":"0x...","retval":"0x..."}` |
+| `backtrace` | `{"ok":true,"frames":[{"n":N,"rip":"0x...","module":"..."},...]}` |
+| `disas` | `{"ok":true,"addr":"0x...","len":N,"insns":[{"addr","bytes","mnemonic","op_str"},...]}` |
+| `finish` | `{"ok":true,"symbol":"...","addr":"0x...","retval":"0x..."}` |
+| `show` / `show_dump` | `{"ok":true,"maps":[{"start","end","perms","offset","dev","inode","path"},...],"regs":{...}}` |
+| `step` | one object per step (JSON Lines): `{"ok":true,"step":N,"rip":"0x...","rsp","rbp","rax","rbx","rcx","rdx"}` |
+
+`step` emits one object per step (JSON Lines) so scripts can follow execution.
+All other `--json` commands emit a single JSON object.
+
+On failure the object is `{"ok":false,"command":"...","error":"..."}` and the
+exit code is non-zero.
+
 ### Process Inspection
 
 | Command | Description |
@@ -188,7 +226,7 @@ Example - spawn a shell:
 | `call <pid> <addr> [args]` | Call function at address with arguments |
 | `load_so <pid> <path>` | Load shared library into process |
 | `resolve <pid> <symbol>` | Resolve symbol address using dlsym (falls back to the ELF table if dlsym can't see it) |
-| `elfresolve <pid> <symbol>` | Resolve symbol address from the target's ELF symbol table (covers static `.symtab` symbols dlsym can't see) |
+| `elfresolve <pid> <symbol>` | Resolve symbol address from the target's ELF symbol table (covers static `.symtab` functions and data objects dlsym can't see) |
 | `upload <pid> <hex> [perms]` | Upload bytes to remote process memory |
 | `upload <pid> --str <string> [perms]` | Upload string to remote process memory |
 

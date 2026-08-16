@@ -179,20 +179,22 @@ static int live_maps_prot_for_range(pid_t pid, uint64_t start, uint64_t end, int
 bool mem_write_region(pid_t pid, uint64_t addr, const void *data, size_t len) {
     int prot = 0;
     if (live_maps_prot_for_range(pid, addr, addr + len, &prot) != 0) {
-        fprintf(stderr, "[mw] address range %016llx-%016llx not mapped in pid %d\n",
-                (unsigned long long)addr, (unsigned long long)(addr+len), (int)pid);
+        if (!g_json)
+            fprintf(stderr, "[mw] address range %016llx-%016llx not mapped in pid %d\n",
+                    (unsigned long long)addr, (unsigned long long)(addr+len), (int)pid);
         return false;
     }
     bool need_temp = (prot & PROT_WRITE) == 0;
     if (need_temp) {
         if (remote_mprotect(pid, addr, len, prot | PROT_WRITE) != 0) {
-            fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
-                    (unsigned long long)addr, (unsigned long long)(addr+len));
+            if (!g_json)
+                fprintf(stderr, "[mw] temp mprotect RW failed for %016llx-%016llx\n",
+                        (unsigned long long)addr, (unsigned long long)(addr+len));
             return false;
         }
     }
     bool ok = write_bytes_to_pid(pid, addr, data, len);
-    if (!ok) perror("process write");
+    if (!ok && !g_json) perror("process write");
     if (need_temp) (void)remote_mprotect(pid, addr, len, prot);
     return ok;
 }
@@ -654,7 +656,11 @@ void step_pid(pid_t pid, int max_steps) {
     }
     int status; if (waitpid_eintr(pid, &status) == -1) DIE("waitpid step attach");
     (void)ptrace(PTRACE_SETOPTIONS, pid, 0, (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXIT));
-    (void)kill(pid, SIGCONT);
+
+    /* No SIGCONT here: sending one while the tracee is stopped makes the tracer
+       receive a SIGCONT signal-delivery-stop on the next wait, and re-sending
+       SIGCONT reproduces it forever (each iteration would be a SIGCONT stop, not
+       a real single-step). Single-step directly from the stopped state instead. */
 
     /* Catch SIGINT so Ctrl+C stops stepping instead of killing us while the
        tracee sits at a single-step SIGTRAP stop (which would be delivered as
@@ -668,38 +674,103 @@ void step_pid(pid_t pid, int max_steps) {
             int sig = WSTOPSIG(status);
             regs_t r; if (ptrace(PTRACE_GETREGS, pid, 0, &r) == -1) DIE("GETREGS after step");
             if (sig == SIGTRAP) {
-                dump_regs_and_bytes(pid, &r);
+                if (g_json) {
+                    printf("{\"ok\":true,\"command\":\"step\",\"step\":%d,"
+                           "\"rip\":\"0x%016llx\",\"rsp\":\"0x%016llx\",\"rbp\":\"0x%016llx\","
+                           "\"rax\":\"0x%016llx\",\"rbx\":\"0x%016llx\",\"rcx\":\"0x%016llx\","
+                           "\"rdx\":\"0x%016llx\"}\n",
+                           i + 1,
+                           (unsigned long long)r.rip, (unsigned long long)r.rsp,
+                           (unsigned long long)r.rbp, (unsigned long long)r.rax,
+                           (unsigned long long)r.rbx, (unsigned long long)r.rcx,
+                           (unsigned long long)r.rdx);
+                } else {
+                    dump_regs_and_bytes(pid, &r);
+                }
                 if (max_steps>0 && i+1>=max_steps) {
                     tracee_detach(pid, NULL);
                     return;
                 }
                 if (g_interrupt) {
                     tracee_detach(pid, NULL);
-                    fprintf(stderr, "[step] interrupted; detached, process continues.\n");
+                    if (g_json) json_err("step", "interrupted");
+                    else fprintf(stderr, "[step] interrupted; detached, process continues.\n");
                     return;
                 }
                 continue;
             }
             if (sig == SIGSTOP || sig == SIGCONT) { (void)kill(pid, SIGCONT); continue; }
-            fprintf(stderr, "[step] stopped with signal %d at rip=%016llx\n", sig, (unsigned long long)r.rip);
-            if (sig == SIGSEGV) {
-                siginfo_t si; if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0)
-                    fprintf(stderr, "[step] SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
+            if (g_json) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "stopped with signal %d at rip=%016llx", sig, (unsigned long long)r.rip);
+                tracee_detach(pid, (void *)(long)sig);
+                json_err("step", msg);
+            } else {
+                fprintf(stderr, "[step] stopped with signal %d at rip=%016llx\n", sig, (unsigned long long)r.rip);
+                if (sig == SIGSEGV) {
+                    siginfo_t si; if (ptrace(PTRACE_GETSIGINFO, pid, 0, &si) == 0)
+                        fprintf(stderr, "[step] SIGSEGV si_addr=%p si_code=%d\n", si.si_addr, si.si_code);
+                }
+                dump_regs_and_bytes(pid, &r);
+                tracee_detach(pid, (void *)(long)sig);
             }
-            dump_regs_and_bytes(pid, &r);
-            tracee_detach(pid, (void *)(long)sig);
             return;
         } else if (WIFEXITED(status)) {
-            fprintf(stderr, "[step] process exited code=%d\n", WEXITSTATUS(status));
+            if (g_json) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "process exited code=%d", WEXITSTATUS(status));
+                json_err("step", msg);
+            } else {
+                fprintf(stderr, "[step] process exited code=%d\n", WEXITSTATUS(status));
+            }
             return;
         } else if (WIFSIGNALED(status)) {
-            fprintf(stderr, "[step] process terminated by signal %d\n", WTERMSIG(status));
+            if (g_json) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "process terminated by signal %d", WTERMSIG(status));
+                json_err("step", msg);
+            } else {
+                fprintf(stderr, "[step] process terminated by signal %d\n", WTERMSIG(status));
+            }
             return;
         }
     }
     /* Loop ended early (Ctrl+C) while the tracee is stopped at a SIGTRAP stop. */
     tracee_detach(pid, NULL);
-    if (g_interrupt) fprintf(stderr, "[step] interrupted; detached, process continues.\n");
+    if (g_json) {
+        if (g_interrupt) json_err("step", "interrupted");
+    } else if (g_interrupt) {
+        fprintf(stderr, "[step] interrupted; detached, process continues.\n");
+    }
+}
+
+typedef struct {
+    uint64_t start, end, offset, inode;
+    char perms[5];
+    unsigned dev_major, dev_minor;
+    char path[512];
+} json_map_t;
+
+static const char *show_json_name(show_mode_t mode) {
+    return mode == SHOW_LIVE ? "show" : "show_dump";
+}
+
+static void show_regs_json(const struct user_regs_struct *regs) {
+    printf("\"regs\":{\"rip\":\"0x%016llx\",\"rsp\":\"0x%016llx\",\"rbp\":\"0x%016llx\","
+           "\"rax\":\"0x%016llx\",\"rbx\":\"0x%016llx\",\"rcx\":\"0x%016llx\","
+           "\"rdx\":\"0x%016llx\",\"rsi\":\"0x%016llx\",\"rdi\":\"0x%016llx\","
+           "\"r8\":\"0x%016llx\",\"r9\":\"0x%016llx\",\"r10\":\"0x%016llx\","
+           "\"r11\":\"0x%016llx\",\"r12\":\"0x%016llx\",\"r13\":\"0x%016llx\","
+           "\"r14\":\"0x%016llx\",\"r15\":\"0x%016llx\"}",
+           (unsigned long long)regs->rip, (unsigned long long)regs->rsp,
+           (unsigned long long)regs->rbp, (unsigned long long)regs->rax,
+           (unsigned long long)regs->rbx, (unsigned long long)regs->rcx,
+           (unsigned long long)regs->rdx, (unsigned long long)regs->rsi,
+           (unsigned long long)regs->rdi, (unsigned long long)regs->r8,
+           (unsigned long long)regs->r9, (unsigned long long)regs->r10,
+           (unsigned long long)regs->r11, (unsigned long long)regs->r12,
+           (unsigned long long)regs->r13, (unsigned long long)regs->r14,
+           (unsigned long long)regs->r15);
 }
 
 void show_maps_and_regs(show_mode_t mode, const char *arg) {
@@ -709,8 +780,17 @@ void show_maps_and_regs(show_mode_t mode, const char *arg) {
     } else {
         it = parse_maps_dump(arg);
     }
-    if (!it) { perror("fopen maps/maps.txt"); return; }
-    printf("%-18s %-18s %-5s %-8s %-8s %-8s %s\n", "START", "END", "PERM", "OFFSET", "DEV", "INODE", "PATH");
+    if (!it) {
+        if (g_json) json_err(show_json_name(mode), "could not read maps");
+        else perror("fopen maps/maps.txt");
+        return;
+    }
+
+    json_map_t *jmaps = NULL;
+    size_t njmaps = 0;
+    if (!g_json) {
+        printf("%-18s %-18s %-5s %-8s %-8s %-8s %s\n", "START", "END", "PERM", "OFFSET", "DEV", "INODE", "PATH");
+    }
     procmaps_struct *map;
     char perms[5];
     while ((map = pmparser_next(it)) != NULL) {
@@ -719,30 +799,94 @@ void show_maps_and_regs(show_mode_t mode, const char *arg) {
         perms[2] = map->is_x ? 'x' : '-';
         perms[3] = map->is_p ? 'p' : '-';
         perms[4] = '\0';
-        printf("%016lx %016lx %-5s %08lx %02x:%02x %-8llu %s\n",
-               (unsigned long)map->addr_start, (unsigned long)map->addr_end,
-               perms, (unsigned long)map->offset,
-               map->dev_major, map->dev_minor,
-               map->inode, map->pathname ? map->pathname : "");
+        if (g_json) {
+            json_map_t *j = (json_map_t*)realloc(jmaps, (njmaps + 1) * sizeof(*jmaps));
+            if (!j) break;
+            jmaps = j;
+            json_map_t *m = &jmaps[njmaps];
+            memset(m, 0, sizeof(*m));
+            m->start = (uint64_t)map->addr_start;
+            m->end = (uint64_t)map->addr_end;
+            m->offset = (uint64_t)map->offset;
+            m->inode = map->inode;
+            m->dev_major = map->dev_major;
+            m->dev_minor = map->dev_minor;
+            snprintf(m->perms, sizeof(m->perms), "%s", perms);
+            if (map->pathname) snprintf(m->path, sizeof(m->path), "%s", map->pathname);
+            njmaps++;
+        } else {
+            printf("%016lx %016lx %-5s %08lx %02x:%02x %-8llu %s\n",
+                   (unsigned long)map->addr_start, (unsigned long)map->addr_end,
+                   perms, (unsigned long)map->offset,
+                   map->dev_major, map->dev_minor,
+                   map->inode, map->pathname ? map->pathname : "");
+        }
     }
     pmparser_free(it);
 
     struct user_regs_struct regs;
+    bool have_regs = false;
     if (mode == SHOW_LIVE) {
         pid_t pid = (pid_t)atoi(arg);
-        if (tracee_attach(pid) == -1) { perror("PTRACE_ATTACH"); return; }
+        if (tracee_attach(pid) == -1) {
+            if (g_json) { json_err(show_json_name(mode), "PTRACE_ATTACH failed"); free(jmaps); return; }
+            perror("PTRACE_ATTACH");
+            free(jmaps);
+            return;
+        }
         tracee_wait(pid, NULL);
-        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) { perror("PTRACE_GETREGS"); tracee_detach(pid, NULL); return; }
-        printf("\nRegisters:\n");
+        if (ptrace(PTRACE_GETREGS, pid, 0, &regs) == -1) {
+            if (g_json) json_err(show_json_name(mode), "PTRACE_GETREGS failed");
+            else perror("PTRACE_GETREGS");
+            tracee_detach(pid, NULL);
+            free(jmaps);
+            return;
+        }
         tracee_detach(pid, NULL);
+        have_regs = true;
     } else {
         char rpath[512]; snprintf(rpath, sizeof(rpath), "%s/regs.bin", arg);
         FILE *rf = fopen(rpath, "rb");
-        if (!rf) { perror("fopen regs.bin"); return; }
-        if (fread(&regs, 1, sizeof(regs), rf) != sizeof(regs)) { perror("fread regs.bin"); fclose(rf); return; }
+        if (!rf) {
+            if (g_json) json_err(show_json_name(mode), "fopen regs.bin failed");
+            else perror("fopen regs.bin");
+            free(jmaps);
+            return;
+        }
+        if (fread(&regs, 1, sizeof(regs), rf) != sizeof(regs)) {
+            if (g_json) json_err(show_json_name(mode), "fread regs.bin failed");
+            else perror("fread regs.bin");
+            fclose(rf);
+            free(jmaps);
+            return;
+        }
         fclose(rf);
-        printf("\nRegisters (from dump):\n");
+        have_regs = true;
     }
+
+    if (g_json) {
+        printf("{\"ok\":true,\"command\":\"%s\",\"maps\":[", show_json_name(mode));
+        for (size_t i = 0; i < njmaps; i++) {
+            if (i) putchar(',');
+            printf("{\"start\":\"0x%016llx\",\"end\":\"0x%016llx\",\"perms\":\"%s\","
+                   "\"offset\":\"0x%08llx\",\"dev\":\"%02x:%02x\",\"inode\":%llu,\"path\":",
+                   (unsigned long long)jmaps[i].start, (unsigned long long)jmaps[i].end,
+                   jmaps[i].perms, (unsigned long long)jmaps[i].offset,
+                   jmaps[i].dev_major, jmaps[i].dev_minor,
+                   (unsigned long long)jmaps[i].inode);
+            json_print_escaped((const unsigned char*)jmaps[i].path, strlen(jmaps[i].path));
+            putchar('}');
+        }
+        printf("],");
+        if (have_regs) show_regs_json(&regs);
+        else printf("\"regs\":null");
+        printf("}\n");
+        free(jmaps);
+        return;
+    }
+
+    if (mode == SHOW_LIVE) printf("\nRegisters:\n");
+    else printf("\nRegisters (from dump):\n");
     printf("RIP: %016llx\n", (unsigned long long)regs.rip);
     printf("RSP: %016llx\n", (unsigned long long)regs.rsp);
     printf("RBP: %016llx\n", (unsigned long long)regs.rbp);
