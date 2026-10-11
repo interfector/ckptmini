@@ -2195,8 +2195,13 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
     if (argc >= 5) regs.r8  = strtoull(argv[4], NULL, 0);
     if (argc >= 6) regs.r9  = strtoull(argv[5], NULL, 0);
 
-    regs.rsp = orig_rsp;
-    regs.rsp -= 8;
+    /* Emulate a `call`: the x86-64 ABI requires %rsp == 8 (mod 16) at
+       function entry (the caller must be 16-aligned before the call). The
+       target's %rsp at attach is arbitrary, so align it down to 16 before
+       pushing the return address. Without this, SSE code (e.g. the movaps
+       stores in glibc's/ld.so's printf/dlsym paths) faults on an unaligned
+       address with SIGSEGV. */
+    regs.rsp = (orig_rsp & ~0xFULL) - 8;
     if (!write_bytes_to_pid(pid, regs.rsp, &trap_pocket, 8)) {
         fprintf(stderr, "call: failed to push return address\n");
         remote_syscall_x64(pid, __NR_munmap, trap_pocket, 4096, 0, 0, 0, 0);
@@ -2227,6 +2232,7 @@ uintptr_t cmd_call_ret(pid_t pid, uint64_t addr, int argc, char **argv, bool det
         }
     } else {
         ptrace(PTRACE_GETREGS, pid, 0, &regs);
+        regs.rax = 0; /* call never returned; don't report a leftover RAX as the result */
         if (!quiet) {
             printf("  ⚠ Call stopped unexpectedly: status=0x%x, sig=%d\n", st, WIFSTOPPED(st) ? WSTOPSIG(st) : 0);
             printf("  RIP: %016llx, RSP: %016llx\n", (unsigned long long)regs.rip, (unsigned long long)regs.rsp);
